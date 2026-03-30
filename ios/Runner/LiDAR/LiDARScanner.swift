@@ -145,8 +145,11 @@ class LiDARScanner: NSObject, ARSessionDelegate {
     }
 
     func stopScan() {
+        guard isScanning else { return }
         isScanning = false
-        processFinalHeightMap()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.processFinalHeightMap()
+        }
     }
 
     private func resetAccumulators() {
@@ -312,8 +315,8 @@ class LiDARScanner: NSObject, ARSessionDelegate {
                 let depth      = depthPtr[idx]
                 let confidence = confPtr[idx]
 
-                // 유효 거리 범위 0.1~15m (low confidence 포함)
-                guard depth > 0.1, depth < 15.0 else { continue }
+                // 유효 거리 범위 0.1~5.0m (low confidence 포함, 먼 거리의 수직 왜곡 방지)
+                guard depth > 0.1, depth < 5.0 else { continue }
 
                 // ARConfidenceLevel: 0=low(0.3), 1=medium(0.6), 2=high(1.0)
                 let confBase: Double = confidence == 2 ? 1.0 : confidence == 1 ? 0.6 : 0.3

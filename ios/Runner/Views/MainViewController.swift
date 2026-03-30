@@ -542,6 +542,11 @@ class MainViewController: UIViewController {
     }
     
     private func stopScanning() {
+        scanButton.setTitle("⏳ 처리 중...", for: .normal)
+        scanButton.backgroundColor = .systemGray
+        scanButton.isEnabled = false
+        instructionLabel.text = "스캔 데이터를 분석 중입니다..."
+        
         scanner.stopScan()
         // onScanComplete 콜백에서 처리됨
     }
