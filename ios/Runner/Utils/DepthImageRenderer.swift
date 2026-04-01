@@ -25,7 +25,7 @@ class DepthImageRenderer {
         depthBuffer: CVPixelBuffer,
         confidenceBuffer: CVPixelBuffer?,
         minDepth: Float = 0.15,
-        maxDepth: Float = 4.0,
+        maxDepth: Float = 10.0,
         tiltPitch: Double = 0,
         tiltRoll: Double = 0
     ) -> UIImage? {

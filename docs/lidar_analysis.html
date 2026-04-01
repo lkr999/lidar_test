@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LiDAR 골프 퍼팅 분석 시스템 - 기술 문서</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0f1e;
+    --bg2: #0f1829;
+    --card: #131f35;
+    --card2: #1a2840;
+    --border: rgba(99,179,237,0.15);
+    --accent: #63b3ed;
+    --green: #48bb78;
+    --yellow: #f6e05e;
+    --red: #fc8181;
+    --cyan: #76e4f7;
+    --purple: #b794f4;
+    --text: #e2e8f0;
+    --text2: #a0aec0;
+    --text3: #718096;
+    --formula-bg: #0d1520;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); font-family:'Noto Sans KR',sans-serif; line-height:1.7; }
+  
+  /* Header */
+  header { background:linear-gradient(135deg,#0a1628 0%,#0f2040 50%,#0a1628 100%); padding:60px 40px 50px; text-align:center; border-bottom:1px solid var(--border); position:relative; overflow:hidden; }
+  header::before { content:''; position:absolute; inset:0; background:radial-gradient(ellipse at 50% 0%, rgba(99,179,237,0.1) 0%, transparent 70%); }
+  .header-badge { display:inline-block; background:rgba(99,179,237,0.15); border:1px solid rgba(99,179,237,0.3); border-radius:20px; padding:5px 16px; font-size:12px; color:var(--accent); letter-spacing:2px; margin-bottom:20px; text-transform:uppercase; }
+  header h1 { font-size:clamp(24px,4vw,42px); font-weight:900; background:linear-gradient(135deg,#fff 0%,var(--accent) 100%); -webkit-background-clip:text; -webkit-text-fill-color:transparent; margin-bottom:12px; }
+  header p { color:var(--text2); font-size:16px; max-width:700px; margin:0 auto; }
+  
+  /* Nav */
+  nav { position:sticky; top:0; z-index:100; background:rgba(10,15,30,0.95); backdrop-filter:blur(10px); border-bottom:1px solid var(--border); padding:0 40px; display:flex; gap:4px; overflow-x:auto; }
+  nav a { display:block; padding:14px 16px; color:var(--text2); text-decoration:none; font-size:13px; font-weight:500; white-space:nowrap; border-bottom:2px solid transparent; transition:all 0.2s; }
+  nav a:hover { color:var(--accent); border-color:var(--accent); }
+  
+  /* Layout */
+  .container { max-width:1200px; margin:0 auto; padding:50px 30px; }
+  
+  /* Sections */
+  section { margin-bottom:80px; }
+  .section-header { display:flex; align-items:center; gap:14px; margin-bottom:35px; }
+  .section-num { background:linear-gradient(135deg,var(--accent),var(--cyan)); color:#000; width:38px; height:38px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-weight:900; font-size:16px; flex-shrink:0; }
+  .section-header h2 { font-size:clamp(20px,3vw,30px); font-weight:700; }
+  
+  /* Cards */
+  .card { background:var(--card); border:1px solid var(--border); border-radius:16px; padding:28px; margin-bottom:20px; }
+  .card-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:20px; margin-bottom:20px; }
+  .card h3 { font-size:17px; font-weight:700; color:var(--accent); margin-bottom:14px; display:flex; align-items:center; gap:8px; }
+  .card h4 { font-size:14px; font-weight:600; color:var(--text2); margin:14px 0 8px; }
+  .card p, .card li { font-size:14px; color:var(--text2); }
+  .card ul { padding-left:20px; }
+  .card li { margin-bottom:4px; }
+  
+  /* Formula boxes */
+  .formula-box { background:var(--formula-bg); border:1px solid rgba(99,179,237,0.25); border-left:3px solid var(--accent); border-radius:8px; padding:16px 20px; margin:12px 0; font-family:'JetBrains Mono',monospace; font-size:13px; color:var(--cyan); overflow-x:auto; }
+  .formula-box .comment { color:var(--text3); font-size:11px; display:block; margin-top:4px; }
+  
+  /* Image panels */
+  .img-panel { background:var(--card); border:1px solid var(--border); border-radius:16px; overflow:hidden; margin-bottom:24px; }
+  .img-panel img { width:100%; display:block; }
+  .img-caption { padding:14px 20px; background:var(--card2); font-size:13px; color:var(--text2); text-align:center; }
+  .img-caption strong { color:var(--accent); }
+  
+  /* Badges */
+  .badge { display:inline-block; padding:3px 10px; border-radius:12px; font-size:11px; font-weight:600; margin:2px; }
+  .badge-green  { background:rgba(72,187,120,0.15); color:var(--green); border:1px solid rgba(72,187,120,0.3); }
+  .badge-yellow { background:rgba(246,224,94,0.15); color:var(--yellow); border:1px solid rgba(246,224,94,0.3); }
+  .badge-red    { background:rgba(252,129,129,0.15); color:var(--red); border:1px solid rgba(252,129,129,0.3); }
+  .badge-blue   { background:rgba(99,179,237,0.15); color:var(--accent); border:1px solid rgba(99,179,237,0.3); }
+  .badge-purple { background:rgba(183,148,244,0.15); color:var(--purple); border:1px solid rgba(183,148,244,0.3); }
+  
+  /* Pipeline flow */
+  .pipeline { display:flex; align-items:stretch; gap:0; flex-wrap:wrap; margin:20px 0; }
+  .pipe-step { flex:1; min-width:150px; background:var(--card2); border:1px solid var(--border); padding:16px; position:relative; text-align:center; }
+  .pipe-step:not(:last-child)::after { content:'→'; position:absolute; right:-14px; top:50%; transform:translateY(-50%); color:var(--accent); font-size:18px; z-index:1; }
+  .pipe-step .pipe-num { width:28px; height:28px; background:var(--accent); color:#000; border-radius:50%; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:13px; margin:0 auto 8px; }
+  .pipe-step h4 { font-size:12px; color:var(--text); margin-bottom:4px; }
+  .pipe-step p { font-size:11px; color:var(--text3); }
+
+  /* Alert boxes */
+  .alert { border-radius:10px; padding:16px 20px; margin:16px 0; font-size:13px; display:flex; gap:12px; }
+  .alert-warn { background:rgba(246,224,94,0.08); border:1px solid rgba(246,224,94,0.25); }
+  .alert-warn .alert-icon { color:var(--yellow); font-size:20px; }
+  .alert-info { background:rgba(99,179,237,0.08); border:1px solid rgba(99,179,237,0.25); }
+  .alert-info .alert-icon { color:var(--accent); font-size:20px; }
+  .alert-good { background:rgba(72,187,120,0.08); border:1px solid rgba(72,187,120,0.25); }
+  .alert-good .alert-icon { color:var(--green); font-size:20px; }
+  .alert strong { display:block; margin-bottom:4px; color:var(--text); }
+
+  /* Table */
+  table { width:100%; border-collapse:collapse; font-size:13px; margin:12px 0; }
+  th { background:var(--card2); color:var(--accent); padding:10px 14px; text-align:left; border-bottom:1px solid var(--border); }
+  td { padding:10px 14px; border-bottom:1px solid rgba(99,179,237,0.07); color:var(--text2); }
+  tr:hover td { background:rgba(99,179,237,0.04); }
+
+  /* Improvement cards */
+  .improve-card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:22px; margin-bottom:16px; display:flex; gap:18px; }
+  .improve-icon { font-size:28px; flex-shrink:0; }
+  .improve-body h3 { font-size:16px; font-weight:700; color:var(--text); margin-bottom:8px; }
+  .improve-body p { font-size:13px; color:var(--text2); margin-bottom:8px; }
+  .priority-high { border-left:3px solid var(--red); }
+  .priority-med  { border-left:3px solid var(--yellow); }
+  .priority-low  { border-left:3px solid var(--green); }
+
+  /* Height correction diagram */
+  .height-diagram { background:var(--formula-bg); border:1px solid var(--border); border-radius:12px; padding:24px; margin:20px 0; }
+  .height-diagram h4 { color:var(--cyan); font-size:14px; margin-bottom:16px; }
+  .person-row { display:flex; align-items:flex-end; gap:30px; justify-content:center; flex-wrap:wrap; margin:20px 0; }
+  .person { text-align:center; }
+  .person-bar { width:16px; background:linear-gradient(to top,var(--green),rgba(72,187,120,0.3)); border-radius:4px 4px 0 0; margin:0 auto 6px; position:relative; }
+  .person-label { font-size:11px; color:var(--text3); }
+  .person-height { font-size:13px; font-weight:700; color:var(--yellow); }
+  .h-arrow { display:flex; align-items:center; justify-content:center; padding-bottom:30px; color:var(--accent); font-size:20px; }
+
+  /* Responsive */
+  @media(max-width:768px) { 
+    .container { padding:30px 16px; }
+    .pipeline { flex-direction:column; }
+    .pipe-step:not(:last-child)::after { content:'↓'; right:50%; top:auto; bottom:-14px; transform:translateX(50%); }
+    header { padding:40px 20px; }
+    nav { padding:0 16px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-badge">Technical Analysis Document</div>
+  <h1>LiDAR 골프 퍼팅 분석 시스템</h1>
+  <p>iOS ARKit 기반 LiDAR 거리측정 원리, 좌표 변환, 보정 알고리즘 및 메쉬그리드 개선 방안</p>
+</header>
+
+<nav>
+  <a href="#s1">① 개요</a>
+  <a href="#s2">② 거리측정 원리</a>
+  <a href="#s3">③ 좌표 변환</a>
+  <a href="#s4">④ 기준점·기준면</a>
+  <a href="#s5">⑤ 계산 수식</a>
+  <a href="#s6">⑥ 높이 편차 보정</a>
+  <a href="#s7">⑦ 후처리 필터</a>
+  <a href="#s8">⑧ 품질 지표</a>
+  <a href="#s9">⑨ 메쉬그리드 개선</a>
+  <a href="#s10">⑩ 종합 제안</a>
+</nav>
+
+<div class="container">
+
+<!-- ① 개요 -->
+<section id="s1">
+  <div class="section-header">
+    <div class="section-num">1</div>
+    <h2>시스템 개요</h2>
+  </div>
+
+  <div class="card-grid">
+    <div class="card">
+      <h3>🎯 목적</h3>
+      <p>iPhone LiDAR 센서로 골프 그린 지형을 3D 스캔한 후, 볼-홀 간 최적 퍼팅 궤적(브레이크 방향·속도)을 실시간으로 계산하여 AR 화면에 오버레이 표시</p>
+    </div>
+    <div class="card">
+      <h3>📦 주요 모듈</h3>
+      <ul>
+        <li><span class="badge badge-blue">LiDARScanner</span> — 깊이 데이터 수집</li>
+        <li><span class="badge badge-green">DepthImageRenderer</span> — false-color 시각화</li>
+        <li><span class="badge badge-yellow">TerrainAnalyzer</span> — 경사 분석</li>
+        <li><span class="badge badge-purple">PuttingPhysics</span> — 궤적 계산</li>
+        <li><span class="badge badge-blue">TrajectoryOverlayView</span> — 결과 렌더링</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>⚙️ 그리드 설정</h3>
+      <ul>
+        <li>해상도: <strong style="color:var(--cyan)">300 × 300</strong> 셀</li>
+        <li>셀 크기: <strong style="color:var(--cyan)">5 cm</strong></li>
+        <li>커버리지: <strong style="color:var(--cyan)">15m × 15m</strong></li>
+        <li>유효 거리: <strong style="color:var(--cyan)">0.1 ~ 5.0 m</strong></li>
+        <li>픽셀 처리 step: <strong style="color:var(--cyan)">4px 간격</strong></li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="img-panel">
+    <img src="images/lidar_measurement_diagram.png" alt="LiDAR 측정 개요">
+    <div class="img-caption"><strong>Fig.1</strong> — iPhone LiDAR 센서가 30° 각도로 그린 표면을 스캔하는 전체 구성. 사람 높이(1.4~1.8m)에서 다수의 깊이 포인트(d₁~dₙ)를 측정하고 카메라·월드 좌표계를 거쳐 그리드에 누적</div>
+  </div>
+</section>
+
+<!-- ② 거리측정 원리 -->
+<section id="s2">
+  <div class="section-header">
+    <div class="section-num">2</div>
+    <h2>이미지 기반 거리측정 원리</h2>
+  </div>
+
+  <div class="card">
+    <h3>📷 ARKit SceneDepth 깊이 맵</h3>
+    <p>iPhone Pro LiDAR는 적외선 레이저를 방사하고 ToF(Time-of-Flight) 방식으로 각 픽셀의 깊이(d)를 <code>kCVPixelFormatType_DepthFloat32</code> 포맷으로 반환합니다. ARKit은 두 가지 깊이 맵을 제공합니다:</p>
+    <br>
+    <table>
+      <tr><th>맵 종류</th><th>특징</th><th>사용</th></tr>
+      <tr><td><code>sceneDepth</code></td><td>원시 LiDAR 데이터, 노이즈 포함</td><td>신뢰도 맵과 함께 원본 제공</td></tr>
+      <tr><td><code>smoothedSceneDepth</code></td><td>ARKit 내부 시계열 평활화 적용</td><td>✅ 이 앱에서 우선 사용</td></tr>
+    </table>
+    <div class="formula-box">
+      guard let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth
+      <span class="comment">// smoothed depth 우선, 없으면 raw depth 사용 (LiDARScanner.swift:282)</span>
+    </div>
+  </div>
+
+  <div class="card-grid">
+    <div class="card">
+      <h3>🔬 신뢰도 맵 (ConfidenceMap)</h3>
+      <p>각 픽셀마다 ARKit이 신뢰도 레벨을 UInt8로 제공:</p>
+      <br>
+      <table>
+        <tr><th>값</th><th>레벨</th><th>가중치</th></tr>
+        <tr><td>0</td><td>Low</td><td>0.3</td></tr>
+        <tr><td>1</td><td>Medium</td><td>0.6</td></tr>
+        <tr><td>2</td><td>High</td><td>1.0</td></tr>
+      </table>
+      <div class="formula-box">let confBase = confidence == 2 ? 1.0 : confidence == 1 ? 0.6 : 0.3</div>
+    </div>
+    <div class="card">
+      <h3>🎨 False-Color 깊이 이미지</h3>
+      <p>Jet Colormap으로 깊이를 색상화 (~2fps 업데이트):</p>
+      <br>
+      <table>
+        <tr><th>색상</th><th>의미</th></tr>
+        <tr><td>🔵 파랑</td><td>가까운 거리 (0.15m)</td></tr>
+        <tr><td>🟢 초록</td><td>중간 거리</td></tr>
+        <tr><td>🔴 빨강</td><td>먼 거리 (4.0m)</td></tr>
+        <tr><td>⬛ 어두움</td><td>유효범위 밖 / 미측정</td></tr>
+      </table>
+      <div class="formula-box">t = 1.0 - (depth - minDepth) / depthRange
+<span class="comment">// t=1: 가깝다(파랑), t=0: 멀다(빨강)</span></div>
+    </div>
+  </div>
+
+  <div class="alert alert-info">
+    <span class="alert-icon">ℹ️</span>
+    <div><strong>픽셀 처리 방식</strong>전체 깊이 맵을 step=4 간격으로 순회합니다. 깊이 맵 해상도가 약 256×192라면 프레임당 약 3,072개의 포인트를 처리합니다. step=2로 줄이면 4배 더 많은 포인트(밀도 향상)를 얻을 수 있으나 처리 시간이 증가합니다.</div>
+  </div>
+</section>
+
+<!-- ③ 좌표 변환 -->
+<section id="s3">
+  <div class="section-header">
+    <div class="section-num">3</div>
+    <h2>좌표 변환 파이프라인</h2>
+  </div>
+
+  <div class="img-panel">
+    <img src="images/coordinate_transform_pipeline.png" alt="좌표 변환 파이프라인">
+    <div class="img-caption"><strong>Fig.2</strong> — 깊이 픽셀 (u,v,z) → 카메라 좌표계 → 월드 좌표계 → 그리드 인덱스 변환의 3단계 파이프라인</div>
+  </div>
+
+  <div class="card">
+    <h3>📐 Step 1: 픽셀 → 카메라 좌표계</h3>
+    <p>카메라 내부 파라미터(intrinsics)를 사용하여 깊이 픽셀 (u, v)를 3D 카메라 좌표로 역투영합니다:</p>
+    <div class="formula-box">
+let intrinsics = frame.camera.intrinsics
+let fx = intrinsics[0][0]  // X축 초점 거리 (픽셀 단위)
+let fy = intrinsics[1][1]  // Y축 초점 거리
+let cx = intrinsics[2][0]  // X축 주점 (principal point)
+let cy = intrinsics[2][1]  // Y축 주점
+
+// 역투영 공식
+Xc = (u - cx) × z / fx    // 카메라 X (좌우)
+Yc = (v - cy) × z / fy    // 카메라 Y (상하)
+Zc = -z                    // 카메라 Z (깊이, ARKit은 -Z가 전방)
+
+localPt = SIMD4(Xc, Yc, -z, 1.0)   // 동차 좌표
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>🌍 Step 2: 카메라 → 월드 좌표계</h3>
+    <p>4×4 카메라 변환 행렬(T_cam)로 월드 좌표로 변환합니다. ARKit 월드계에서 Y축이 위(up)입니다:</p>
+    <div class="formula-box">
+worldPt = cameraTransform × localPt
+<span class="comment">// cameraTransform = frame.camera.transform (4×4 SE(3) 행렬: 회전 R + 이동 t)</span>
+<span class="comment">// worldPt.x = 월드 X, worldPt.y = 월드 높이(Y=up), worldPt.z = 월드 Z</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>🗺️ Step 3: 월드 → 그리드 인덱스</h3>
+    <p>그리드 원점(gridOriginX, gridOriginZ)을 기준으로 상대 좌표로 변환 후 셀 인덱스를 계산합니다:</p>
+    <div class="formula-box">
+relX = worldPt.x - gridOriginX
+relZ = worldPt.z - gridOriginZ
+
+gridRange = 300 × 0.05 / 2 = 7.5 m  // 그리드 반폭
+
+gx = Int((relX + gridRange) / cellSize)   // 0 ~ 299
+gz = Int((relZ + gridRange) / cellSize)   // 0 ~ 299
+
+// 그리드에 가중치 누적
+accumulatedHeights[gz][gx]    += worldPt.y × confWeight
+accumulatedConfidence[gz][gx] += confWeight
+accumulatedCounts[gz][gx]     += 1
+    </div>
+  </div>
+</section>
+
+<!-- ④ 기준점·기준면 -->
+<section id="s4">
+  <div class="section-header">
+    <div class="section-num">4</div>
+    <h2>기준점 및 기준평면 설정</h2>
+  </div>
+
+  <div class="card-grid">
+    <div class="card">
+      <h3>📍 그리드 원점 설정</h3>
+      <p>첫 번째 유효 프레임에서 <strong>카메라 전방 7.5m 지점</strong>을 그리드 중심으로 설정합니다. 이렇게 하면 그리드가 카메라 기준 전방 0~15m 범위를 커버합니다:</p>
+      <div class="formula-box">
+camPos = frame.camera.transform.columns.3
+camFwd = -frame.camera.transform.columns.2  // 카메라 전방벡터 (ARKit -Z)
+halfRange = 300 × 0.05 / 2 = 7.5 m
+
+gridOriginX = camPos.x + (fwdX / |fwd|) × halfRange
+gridOriginZ = camPos.z + (fwdZ / |fwd|) × halfRange
+      </div>
+    </div>
+    <div class="card">
+      <h3>📏 높이(Y) 기준평면</h3>
+      <p>ARKit 월드 좌표계의 <strong>Y축이 절대 높이 기준</strong>입니다. ARKit의 초기화 시 지면 평면 감지(planeDetection: horizontal)로 Y=0 기준면을 설정합니다. 각 셀의 높이는 worldPt.y 값의 <em>가중 평균</em>으로 결정됩니다.</p>
+      <div class="formula-box">
+h_cell = Σ(worldY × confWeight) / Σ(confWeight)
+<span class="comment">// 신뢰도 가중 평균 → 높은 신뢰도 측정값을 더 많이 반영</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>📐 카메라 각도 기준 (tiltQuality)</h3>
+    <p>카메라가 완전히 수평이면 그린 표면을 정확히 측정할 수 없습니다. 카메라 forward 벡터의 Y 성분으로 "아래를 향하는 정도"를 계산하고, 이를 신뢰도 가중치에 곱합니다:</p>
+    <div class="formula-box">
+fwdY = -cam.columns.2.y        // 카메라가 아래를 향할수록 양수 (0~1)
+pointingDownScore = clamp(fwdY, -1, 1)
+
+// 0.15 미만: 거의 수평 → 해당 프레임 유효 포인트로 처리 안함
+guard pointingDownScore > 0.15 else { return }
+
+confWeight = confBase × pointingDownScore   // 기울기 품질 반영
+    </div>
+    <div class="alert alert-warn">
+      <span class="alert-icon">⚠️</span>
+      <div><strong>목표 각도: 30°</strong>  pointingDownScore = sin(30°) ≈ 0.5 — 카메라를 30° 아래로 향할 때 가장 균형 잡힌 커버리지와 측정 정밀도를 얻습니다. tiltScore는 이 목표에서의 편차를 점수화합니다.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ⑤ 핵심 수식 -->
+<section id="s5">
+  <div class="section-header">
+    <div class="section-num">5</div>
+    <h2>핵심 계산 수식</h2>
+  </div>
+
+  <div class="card">
+    <h3>🔢 역투영 (Back-Projection)</h3>
+    <div class="formula-box">
+// 핀홀 카메라 모델 역투영
+Xc = (u - cx) · z / fx
+Yc = (v - cy) · z / fy
+Zc = -z                        // ARKit: 카메라 전방 = -Z
+
+// 동차 좌표 (Homogeneous)
+P_cam = [Xc, Yc, Zc, 1]ᵀ
+
+// 월드 변환
+P_world = T_cam · P_cam
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>📊 경사도 계산 (Central Difference)</h3>
+    <div class="formula-box">
+// 기본 중앙차분 (TerrainAnalyzer.calculateSlope)
+slope_x = -(h[x+1,y] - h[x-1,y]) / (2 · cellSize)
+slope_y = -(h[x,y+1] - h[x,y-1]) / (2 · cellSize)
+
+// 고정밀 다중스케일 가중 중앙차분 (r=3 셀 반경)
+for dr in 1...3:
+    w = 1/dr                              // 거리 반비례 가중치
+    scale = 2 · dr · cellSize
+    gx += w · (h[x+dr,y] - h[x-dr,y]) / scale
+    gy += w · (h[x,y+dr] - h[x,y-dr]) / scale
+    wSum += w
+slope = Vector2(-gx/wSum, -gy/wSum)
+slope_angle_deg = atan(|slope|) × 180/π
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>🏌️ 퍼팅 브레이크 & 속도 계산</h3>
+    <div class="formula-box">
+// 경사 영향 계수 (slopeEffect)
+slopeEffect = 1.0 - resistancePercent / 100.0
+<span class="comment">// 저항 0%=경사 최대반영, 100%=직선 퍼팅</span>
+
+// 브레이크 양 (Quadratic Bezier 컨트롤 포인트 오프셋)
+breakAmount = avgCrossSlope × distance × slopeEffect / 4.0
+
+// 컨트롤 포인트
+mid = (ballPos + holePos) × 0.5
+controlPt = mid - perpDir × (2.0 × breakAmount)
+
+// Bezier 궤적 공식 (t ∈ [0,1])
+B(t) = (1-t)² × P_ball + 2(1-t)t × P_control + t² × P_hole
+
+// 필요 속도 (운동-마찰 에너지 보존)
+effectiveFriction = 0.065 × (1 + resistancePercent/100)
+speed = √(2 × μ × g × distance) × 1.025
+<span class="comment">// g=9.81 m/s², 1.025: 홀 통과 여유 (102.5% 힘)</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>🌊 가우시안 스무딩 커널</h3>
+    <div class="formula-box">
+// 9×9 커널, σ = 9/3 = 3
+G(dx, dy) = exp(-(dx² + dy²) / (2σ²))
+
+// 신뢰도 가중 적용
+smoothed[x,y] = Σ(G(dx,dy) · conf[x+dx,y+dy] · h[x+dx,y+dy])
+              / Σ(G(dx,dy) · conf[x+dx,y+dy])
+    </div>
+  </div>
+
+  <div class="img-panel">
+    <img src="images/heightmap_processing_pipeline.png" alt="높이 맵 처리 파이프라인">
+    <div class="img-caption"><strong>Fig.3</strong> — 가중 평균 → 빈 셀 보간 → 미디언 필터(3×3) → 가우시안 스무딩(9×9) → 최종 높이 맵 처리 파이프라인</div>
+  </div>
+</section>
+
+<!-- ⑥ 높이 편차 보정 -->
+<section id="s6">
+  <div class="section-header">
+    <div class="section-num">6</div>
+    <h2>사람 높이 편차 (1.4~1.8m) 보정</h2>
+  </div>
+
+  <div class="height-diagram">
+    <h4>📏 측정자 높이에 따른 시야 및 편차 분석</h4>
+    <div class="person-row">
+      <div class="person">
+        <div class="person-bar" style="height:112px;"></div>
+        <div class="person-height">1.4m</div>
+        <div class="person-label">키 작은 사람</div>
+      </div>
+      <div class="h-arrow">↔ <br><small style="font-size:10px">40cm 차이</small></div>
+      <div class="person">
+        <div class="person-bar" style="height:140px;"></div>
+        <div class="person-height">1.75m</div>
+        <div class="person-label">평균</div>
+      </div>
+      <div class="h-arrow">↔</div>
+      <div class="person">
+        <div class="person-bar" style="height:144px;"></div>
+        <div class="person-height">1.8m</div>
+        <div class="person-label">키 큰 사람</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>✅ 현재 보정 방식 — ARKit 절대 좌표계 활용</h3>
+    <p>이 앱은 높이 편차를 <strong>명시적으로 보정하지 않아도 되는 구조</strong>로 설계되어 있습니다. 그 이유는:</p>
+    <br>
+    <ol style="padding-left:20px; color:var(--text2); font-size:14px; line-height:2;">
+      <li><strong style="color:var(--accent)">ARKit 월드 Y좌표 사용:</strong> <code>worldPt.y</code>는 ARKit이 추적한 절대 세계 Y좌표입니다. 카메라가 1.4m에 있든 1.8m에 있든, 그린 표면의 worldPt.y는 동일하게 계산됩니다.</li>
+      <li><strong style="color:var(--accent)">카메라 transform 역변환:</strong> <code>T_cam</code>은 카메라의 위치와 방향을 포함하므로, 높이가 달라도 동일한 그린 점은 동일한 worldPt.y로 수렴합니다.</li>
+      <li><strong style="color:var(--accent)">다중 프레임 가중 누적:</strong> 여러 프레임에서 신뢰도 가중 평균을 내므로 단일 높이 오차의 영향이 희석됩니다.</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h3>⚠️ 잠재적 오차 요인 및 현재 미흡한 보정</h3>
+    <table>
+      <tr><th>오차 원인</th><th>영향</th><th>현재 처리</th></tr>
+      <tr>
+        <td>카메라 높이 변화에 따른<br>측정 거리 범위 차이</td>
+        <td>높은 위치에서 더 넓은 표면 커버<br>→ 원거리 포인트 정밀도 저하</td>
+        <td>valid range 0.1~5.0m 필터<br><span class="badge badge-yellow">부분 보정</span></td>
+      </tr>
+      <tr>
+        <td>ARKit 추적 오차 누적<br>(VIO drift)</td>
+        <td>긴 스캔 시 worldPt.y 편차 발생</td>
+        <td>다중 프레임 가중 평균<br><span class="badge badge-yellow">부분 보정</span></td>
+      </tr>
+      <tr>
+        <td>스캔 중 카메라 높이 변동<br>(걷거나 자세 변화)</td>
+        <td>그리드 원점이 이미 설정되어<br>이후 포인트에 오프셋 발생</td>
+        <td>첫 프레임 원점 고정<br><span class="badge badge-red">미보정</span></td>
+      </tr>
+      <tr>
+        <td>스무딩 깊이 데이터의<br>시계열 지연</td>
+        <td>움직임 중 깊이값 지연 보정</td>
+        <td>smoothedSceneDepth 사용<br><span class="badge badge-green">ARKit 보정</span></td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="alert alert-warn">
+    <span class="alert-icon">⚠️</span>
+    <div><strong>현재 누락된 높이-시차 보정</strong> 카메라 높이가 1.4m → 1.8m로 변하면 같은 30° 각도에서 그린 표면의 측정 거리가 달라집니다. 높이 h에서 30° 각도로 바라본 그린 교점까지의 거리 = h / sin(30°) = 2h. 따라서 1.4m에서는 2.8m, 1.8m에서는 3.6m 거리의 점을 같은 픽셀 위치에서 바라봅니다. 이 차이는 약 0.8m 거리 오차를 유발할 수 있습니다.</div>
+  </div>
+
+  <div class="card">
+    <h3>💡 높이 보정 개선 방안</h3>
+    <div class="formula-box">
+// 권장: CoreMotion 고도계로 카메라 높이 추정 후 스케일 보정
+cameraHeight_m = -motionAltitude × 상수   // barometer 기반
+
+// 또는: ARKit planeDetection으로 감지된 지면과 카메라 Y 간 거리
+groundY = detectedHorizontalPlane.transform.columns.3.y
+cameraHeight = cameraTransform.columns.3.y - groundY
+
+// 높이에 따른 유효 거리 범위 동적 조정
+maxValidDepth = min(5.0, cameraHeight / sin(tiltAngle_rad) + 1.0)
+    </div>
+  </div>
+</section>
+
+<!-- ⑦ 보정 항목 -->
+<section id="s7">
+  <div class="section-header">
+    <div class="section-num">7</div>
+    <h2>실제 보정 항목 상세</h2>
+  </div>
+
+  <div class="pipeline">
+    <div class="pipe-step">
+      <div class="pipe-num">1</div>
+      <h4>신뢰도 가중치</h4>
+      <p>Low/Med/High → 0.3/0.6/1.0</p>
+    </div>
+    <div class="pipe-step">
+      <div class="pipe-num">2</div>
+      <h4>자이로 기울기</h4>
+      <p>tiltQuality × confBase</p>
+    </div>
+    <div class="pipe-step">
+      <div class="pipe-num">3</div>
+      <h4>빈 셀 보간</h4>
+      <p>5회 반복 거리가중</p>
+    </div>
+    <div class="pipe-step">
+      <div class="pipe-num">4</div>
+      <h4>미디언 필터</h4>
+      <p>3×3 이상값 제거</p>
+    </div>
+    <div class="pipe-step">
+      <div class="pipe-num">5</div>
+      <h4>가우시안 스무딩</h4>
+      <p>9×9 σ=3 커널</p>
+    </div>
+    <div class="pipe-step">
+      <div class="pipe-num">6</div>
+      <h4>노이즈 임계값</h4>
+      <p>0.5° 미만 경사 무시</p>
+    </div>
+  </div>
+
+  <div class="card-grid">
+    <div class="card">
+      <h3>🎯 신뢰도 × 자이로 복합 가중치</h3>
+      <div class="formula-box">
+confWeight = confBase × tiltQuality
+<span class="comment">// confBase: ARKit 신뢰도 (0.3/0.6/1.0)</span>
+<span class="comment">// tiltQuality: 카메라 기울기 점수 (0.15~1.0)</span>
+<span class="comment">// 최소 가중치: 0.3×0.15=0.045</span>
+<span class="comment">// 최대 가중치: 1.0×1.0=1.0</span>
+      </div>
+      <p>tiltQuality가 낮은 (수평에 가까운) 프레임은 신뢰도에 관계없이 낮은 가중치를 받아 최종 높이 맵 영향이 감소합니다.</p>
+    </div>
+    <div class="card">
+      <h3>🔍 빈 셀 보간 알고리즘</h3>
+      <div class="formula-box">
+for iteration in 0..<5:
+  for each empty cell (conf < 0.01):
+    neighborSum = 0, weightSum = 0
+    for (dx,dy) in -2...2 × -2...2:
+      d = sqrt(dx²+dy²)
+      w = conf[nx,ny] / d
+      neighborSum += height[nx,ny] × w
+      weightSum   += w
+    if weightSum > 0:
+      height[x,y] = neighborSum / weightSum
+      conf[x,y] = 0.3  // 보간된 셀은 낮은 신뢰도
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ⑧ 품질 지표 -->
+<section id="s8">
+  <div class="section-header">
+    <div class="section-num">8</div>
+    <h2>품질 지표 (MeasurementQuality)</h2>
+  </div>
+
+  <div class="card-grid">
+    <div class="card">
+      <h3>📊 5개 품질 지표</h3>
+      <table>
+        <tr><th>지표</th><th>목표값</th><th>계산 방법</th></tr>
+        <tr><td>averageConfidence</td><td>> 0.6</td><td>전체 픽셀 신뢰도 평균 (step=8 샘플)</td></tr>
+        <tr><td>coveragePercent</td><td>> 0.7</td><td>채워진 셀 / 바운딩박스 내 셀 수</td></tr>
+        <tr><td>stabilityScore</td><td>> 0.5</td><td>1 - avg_movement × 50 (최근 30 pose)</td></tr>
+        <tr><td>lightingScore</td><td>> 0.5</td><td>ambientIntensity / 1000.0</td></tr>
+        <tr><td>tiltScore</td><td>> 0.2</td><td>1 - |fwdY - 0.5| / 0.5 (목표: sin30°=0.5)</td></tr>
+      </table>
+    </div>
+    <div class="card">
+      <h3>🤖 자동 종료 조건</h3>
+      <div class="formula-box">
+isGood = coveragePercent    > 0.70
+      && averageConfidence  > 0.60
+      && stabilityScore     > 0.50
+      && tiltScore          > 0.20
+
+// 연속 3 프레임 isGood == true → onAutoStopReady 발동
+if ++autoQualityFrames >= 3:
+    onAutoStopReady()
+      </div>
+      <br>
+      <p>또한 3초 동안 커버리지 변화가 0.2% 미만이면 스캔 정체로 판단하여 자동 완료합니다.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ⑨ 메쉬그리드 개선 -->
+<section id="s9">
+  <div class="section-header">
+    <div class="section-num">9</div>
+    <h2>메쉬그리드 시각화 개선 방안</h2>
+  </div>
+
+  <div class="img-panel">
+    <img src="images/mesh_grid_visualization.png" alt="메쉬그리드 시각화">
+    <div class="img-caption"><strong>Fig.4</strong> — 현재 구현된 메쉬그리드: 높이 히트맵 + 30cm 등간격 격자 + 물 흐름 화살표(경사 벡터) + 등고선 + 퍼팅 궤적</div>
+  </div>
+
+  <div class="improve-card priority-high">
+    <div class="improve-icon">🔺</div>
+    <div class="improve-body">
+      <h3>[우선순위 높음] 3D 인터랙티브 메쉬그리드 (Web/Metal)</h3>
+      <p>현재는 2D 투영 오버레이만 지원합니다. SceneKit 또는 Metal을 이용한 실시간 3D 메쉬 렌더링으로 사용자가 그린을 직접 회전·확대해서 볼 수 있도록 개선하면 경사 이해도가 크게 향상됩니다.</p>
+      <div class="formula-box">// Metal Shader: 높이 → 색상 매핑
+float4 heightColor(float h, float minH, float maxH) {
+    float t = (h - minH) / (maxH - minH);
+    return mix(lowColor, highColor, t);
+}</div>
+      <span class="badge badge-red">높음</span> <span class="badge badge-blue">Metal / SceneKit</span>
+    </div>
+  </div>
+
+  <div class="improve-card priority-high">
+    <div class="improve-icon">📏</div>
+    <div class="improve-body">
+      <h3>[우선순위 높음] 적응형 그리드 해상도 (LOD)</h3>
+      <p>현재 300×300 고정 해상도는 가까운 영역(볼 주변)과 먼 영역(5m 이상)을 동일하게 처리합니다. 볼-홀 주변을 고해상도(2.5cm), 외곽을 저해상도(10cm)로 처리하는 Level-of-Detail 그리드로 개선하면 정밀도와 성능을 동시에 향상시킬 수 있습니다.</p>
+      <span class="badge badge-red">높음</span> <span class="badge badge-purple">알고리즘 개선</span>
+    </div>
+  </div>
+
+  <div class="improve-card priority-med">
+    <div class="improve-icon">🗺️</div>
+    <div class="improve-body">
+      <h3>[우선순위 중간] 등고선 간격 개선 + 레이블링</h3>
+      <p>현재 등고선은 10단계 고정 간격입니다. 실제 고도 차이에 기반한 절대 높이 기준 등고선(예: 1cm 간격)과 각 등고선에 높이값 레이블을 추가하면 훨씬 직관적인 맵이 됩니다.</p>
+      <div class="formula-box">// 개선: 절대 높이 기준 등고선
+let contourInterval = 0.01  // 1cm 간격
+let levels = stride(from: minH, through: maxH, by: contourInterval)</div>
+      <span class="badge badge-yellow">중간</span>
+    </div>
+  </div>
+
+  <div class="improve-card priority-med">
+    <div class="improve-icon">🌊</div>
+    <div class="improve-body">
+      <h3>[우선순위 중간] 경사 벡터 강도 시각화 개선</h3>
+      <p>현재 물 흐름 화살표는 방향은 보여주지만 색상이 단색(cyan)입니다. 경사 크기에 따라 화살표 색상을 변화시키면(초록=완만, 빨강=급경사) 위험 구간을 한눈에 파악할 수 있습니다.</p>
+      <div class="formula-box">// 경사 크기에 따른 색상
+let slopeRatio = min(mag / maxSlope, 1.0)
+let arrowColor = lerpColor(flatColor, steepColor, t: slopeRatio)</div>
+      <span class="badge badge-yellow">중간</span>
+    </div>
+  </div>
+
+  <div class="improve-card priority-low">
+    <div class="improve-icon">🏃</div>
+    <div class="improve-body">
+      <h3>[우선순위 낮음] 실시간 스트리밍 메쉬 갱신</h3>
+      <p>현재는 스캔 완료 후 한 번만 메쉬를 생성합니다. 스캔 중 누적 데이터를 0.5초마다 업데이트하여 실시간으로 메쉬가 채워지는 모습을 보여주면 사용자 경험이 향상됩니다.</p>
+      <span class="badge badge-green">낮음</span> <span class="badge badge-blue">UX 개선</span>
+    </div>
+  </div>
+
+  <div class="improve-card priority-low">
+    <div class="improve-icon">🎯</div>
+    <div class="improve-body">
+      <h3>[우선순위 낮음] Stimp 속도 기반 마찰 자동 설정</h3>
+      <p>현재 저항값을 슬라이더로 수동 설정합니다. 측정된 지형 거칠기(estimateStimpSpeed)를 자동으로 저항값에 매핑하면 보다 물리적으로 정확한 퍼팅 계산이 가능합니다.</p>
+      <div class="formula-box">// Stimp ↔ 저항(resistance) 자동 매핑
+// Stimp 6 (느림) → resistance 80%
+// Stimp 14 (빠름) → resistance 20%
+let resistance = 80.0 - (stimp - 6.0) / 8.0 × 60.0</div>
+      <span class="badge badge-green">낮음</span>
+    </div>
+  </div>
+</section>
+
+<!-- ⑩ 종합 제안 -->
+<section id="s10">
+  <div class="section-header">
+    <div class="section-num">10</div>
+    <h2>정밀도 향상을 위한 종합 제안</h2>
+  </div>
+
+  <div class="card-grid">
+    <div class="card">
+      <h3>🔧 즉시 적용 가능</h3>
+      <ul>
+        <li>✅ 그리드 오픈 후 지속 높이 보정 (ARKit anchor 갱신 반영)</li>
+        <li>✅ step=4 → step=2 로 변경 (처리량 4배, 정밀도 2배)</li>
+        <li>✅ 유효 거리 5.0m → 높이에 따라 동적 조정</li>
+        <li>✅ planeDetection으로 지면 Y=0 재기준 설정</li>
+        <li>✅ 스캔 중 griOrigin 이동 (카메라 이동 시 패닝)</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>🚀 중장기 개선</h3>
+      <ul>
+        <li>🔷 Metal 기반 실시간 3D 메쉬 렌더링</li>
+        <li>🔷 다중 스캔 포인트 클라우드 ICP 정합</li>
+        <li>🔷 CoreML 기반 노이즈 필터링</li>
+        <li>🔷 ARKit World Map 저장 → 재방문 시 기존 맵 재사용</li>
+        <li>🔷 바로미터(고도계) 기반 카메라 높이 추정 강화</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>⚡ 성능 최적화</h3>
+      <ul>
+        <li>🔶 Accelerate/vDSP로 행렬 연산 가속</li>
+        <li>🔶 Metal Compute Shader로 GPU 깊이 처리</li>
+        <li>🔶 sparse grid 자료구조로 메모리 절약</li>
+        <li>🔶 미디언 필터를 vImage 활용 (약 10배 속도향상)</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="alert alert-good">
+    <span class="alert-icon">✅</span>
+    <div><strong>현재 구현의 강점</strong> ARKit의 절대 좌표계를 활용하므로 사람 키 차이(1.4~1.8m)는 이론상 자동 보상됩니다. 신뢰도 × 자이로 복합 가중치는 불량 측정값을 효과적으로 억제하며, 3단계 후처리 필터(보간+미디언+가우시안) 조합은 안정적인 지형 맵을 생성합니다. 가장 즉각적인 개선 포인트는 <strong>step=2 적용</strong>과 <strong>3D 인터랙티브 메쉬 렌더링</strong>입니다.</div>
+  </div>
+</section>
+
+</div>
+
+<footer style="background:var(--bg2); border-top:1px solid var(--border); padding:30px; text-align:center; color:var(--text3); font-size:13px;">
+  <p>LiDAR Putting Analysis System — Technical Documentation</p>
+  <p style="margin-top:6px;">Generated: 2026-04-01 | Based on LiDARScanner.swift, MathUtils.swift, TerrainAnalyzer.swift, PuttingPhysics.swift, DepthImageRenderer.swift</p>
+</footer>
+
+</body>
+</html>

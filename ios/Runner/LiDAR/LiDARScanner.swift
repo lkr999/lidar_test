@@ -5,10 +5,12 @@ import Accelerate
 
 /// LiDAR 스캐너 - ARKit SceneDepth를 이용한 실제 LiDAR 데이터 수집
 ///
-/// 주요 개선사항:
-/// - 깊이 맵 **전체 픽셀** 처리 (step 4→2, 2배 세밀도)
+/// 주요 개선사항 (v2.0):
+/// - 깊이 맵 **모든 픽셀** 처리 (step=1, 최대 정밀도)
+/// - 유효 거리 **10m** 확장, 거리 기반 신뢰도 감쇠(distance decay)
 /// - **자이로/중력 벡터** 기반 카메라 기울기 품질 가중치 적용
-/// - 기울기가 나쁜 프레임(거의 수평) 자동 제외로 정확도 향상
+/// - **지면 평면 감지**로 Y=0 기준면 보정 + 카메라 높이 추적
+/// - Accelerate/vDSP 가속 필터링
 /// - 프레임마다 false-color **깊이 이미지** 생성 → `onDepthImageReady` 콜백
 /// - 스캔 완료 시 tiltPitch/tiltRoll/totalPointCount 를 HeightMapData에 기록
 @available(iOS 14.0, *)
@@ -19,10 +21,10 @@ class LiDARScanner: NSObject, ARSessionDelegate {
     private let session: ARSession
     private var isScanning = false
 
-    // 높이 맵 그리드 설정 (15m×15m, 5cm 해상도)
-    private let targetGridWidth  = 300
-    private let targetGridHeight = 300
-    private let targetCellSize: Double = 0.05   // 5cm → 15m×15m 커버리지
+    // 높이 맵 그리드 설정 (20m×20m, 5cm 해상도)
+    private let targetGridWidth  = 400
+    private let targetGridHeight = 400
+    private let targetCellSize: Double = 0.05   // 5cm → 20m×20m 커버리지
 
     // 프레임 축적 데이터
     private var accumulatedHeights:    [[Double]] = []
@@ -53,6 +55,13 @@ class LiDARScanner: NSObject, ARSessionDelegate {
     private(set) var currentTiltPitch: Double = 0
     /// 최신 roll (°) - 품질 UI 표시용
     private(set) var currentTiltRoll:  Double = 0
+
+    // ── 지면 평면 + 카메라 높이 추적 ──────────────────────────────────
+    /// ARKit 감지 지면 Y 좌표 (planeDetection .horizontal)
+    private var detectedGroundY: Float = 0
+    private var groundDetected = false
+    /// 추정 카메라 높이 (지면 대비)
+    private(set) var estimatedCameraHeight: Float = 1.6
 
     // ── 그리드 동적 원점 (카메라 위치 기반) ──────────────────────────────
     private var gridOriginX: Double = 0
@@ -174,6 +183,9 @@ class LiDARScanner: NSObject, ARSessionDelegate {
         gridMinZ               = 0
         gridMaxZ               = 0
         gridBBoxInitialized    = false
+        groundDetected         = false
+        detectedGroundY        = 0
+        estimatedCameraHeight  = 1.6
     }
 
     // MARK: - ARSessionDelegate
@@ -224,15 +236,21 @@ class LiDARScanner: NSObject, ARSessionDelegate {
             return
         }
 
-        // 첫 유효 프레임에서 그리드 원점을 카메라 전방 7.5m 지점으로 설정
-        // → 그리드가 전방 0m ~ 15m 범위를 커버
+        // 카메라 높이 갱신 (지면 감지 시)
+        let camPosY = frame.camera.transform.columns.3.y
+        if groundDetected {
+            estimatedCameraHeight = camPosY - detectedGroundY
+        }
+
+        // 첫 유효 프레임에서 그리드 원점을 카메라 전방 10m 지점으로 설정
+        // → 그리드가 전방 0m ~ 20m 범위를 커버
         if !gridOriginSet {
             let camPos = frame.camera.transform.columns.3
             let camFwd = frame.camera.transform.columns.2  // ARKit: -Z 방향이 forward
             let fwdX = -Double(camFwd.x)
             let fwdZ = -Double(camFwd.z)
             let fwdLen = sqrt(fwdX * fwdX + fwdZ * fwdZ)
-            let halfRange = Double(targetGridWidth) * targetCellSize / 2.0  // 7.5m
+            let halfRange = Double(targetGridWidth) * targetCellSize / 2.0  // 10m
             if fwdLen > 0.01 {
                 gridOriginX = Double(camPos.x) + fwdX / fwdLen * halfRange
                 gridOriginZ = Double(camPos.z) + fwdZ / fwdLen * halfRange
@@ -258,24 +276,42 @@ class LiDARScanner: NSObject, ARSessionDelegate {
     }
 
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
-        guard isScanning else { return }
         for anchor in anchors {
+            // 지면 평면 감지 (Y=0 기준면 재설정)
+            if let plane = anchor as? ARPlaneAnchor, plane.alignment == .horizontal {
+                let planeY = plane.transform.columns.3.y
+                if !groundDetected || planeY < detectedGroundY {
+                    detectedGroundY = planeY
+                    groundDetected = true
+                }
+            }
+            guard isScanning else { continue }
             if let mesh = anchor as? ARMeshAnchor { extractMeshVertices(mesh) }
         }
     }
 
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
-        guard isScanning else { return }
         for anchor in anchors {
+            // 지면 평면 갱신
+            if let plane = anchor as? ARPlaneAnchor, plane.alignment == .horizontal {
+                let planeY = plane.transform.columns.3.y
+                if planeY < detectedGroundY || !groundDetected {
+                    detectedGroundY = planeY
+                    groundDetected = true
+                }
+            }
+            guard isScanning else { continue }
             if let mesh = anchor as? ARMeshAnchor { extractMeshVertices(mesh) }
         }
     }
 
     // MARK: - Depth Processing
 
-    /// LiDAR 깊이 맵 전체 픽셀을 처리하여 높이 그리드에 축적
+    /// LiDAR 깊이 맵 **모든 픽셀**을 처리하여 높이 그리드에 축적
     ///
-    /// - step=2 → 이전(step=4) 대비 4배 더 많은 포인트, 2배 세밀한 그리드 커버리지
+    /// v2.0 개선:
+    /// - step=1 → 모든 깊이 픽셀 활용 (최대 정밀도)
+    /// - 유효 거리 10m 확장 + 거리 기반 신뢰도 감쇠
     /// - 자이로 기반 tiltQuality 를 confidence 가중치에 곱해서 기울어진 프레임 영향 감소
     private func processDepthData(frame: ARFrame, tiltQuality: Double) {
         // smoothed depth 우선 (노이즈 감소)
@@ -305,9 +341,12 @@ class LiDARScanner: NSObject, ARSessionDelegate {
         let fx = intrinsics[0][0];  let fy = intrinsics[1][1]
         let cx = intrinsics[2][0];  let cy = intrinsics[2][1]
 
-        // ── step=4: 셀 크기 2.5cm에서 충분한 밀도 유지, 처리 속도 향상 ──
-        let step = 4
+        // ── step=1: 모든 픽셀 처리로 최대 정밀도 ──
+        let step = 1
         var localPoints = 0
+
+        // 카메라 높이에 따른 유효 최대 거리 동적 계산
+        let dynamicMaxDepth: Float = min(10.0, Float(estimatedCameraHeight) / 0.15 + 2.0)
 
         for v in stride(from: 0, to: dh, by: step) {
             for u in stride(from: 0, to: dw, by: step) {
@@ -315,13 +354,17 @@ class LiDARScanner: NSObject, ARSessionDelegate {
                 let depth      = depthPtr[idx]
                 let confidence = confPtr[idx]
 
-                // 유효 거리 범위 0.1~5.0m (low confidence 포함, 먼 거리의 수직 왜곡 방지)
-                guard depth > 0.1, depth < 5.0 else { continue }
+                // 유효 거리 범위 0.1~10m (카메라 높이에 따라 동적 상한)
+                guard depth > 0.1, depth < dynamicMaxDepth else { continue }
 
                 // ARConfidenceLevel: 0=low(0.3), 1=medium(0.6), 2=high(1.0)
-                let confBase: Double = confidence == 2 ? 1.0 : confidence == 1 ? 0.6 : 0.3
-                // 자이로 기울기 품질 반영
-                let confWeight = confBase * tiltQuality
+                let confLevelBase: Double = confidence == 2 ? 1.0 : confidence == 1 ? 0.6 : 0.3
+
+                // 거리 기반 신뢰도 감쇠 (3m 이내=1.0, 이후 선형 감소, 10m=0.3)
+                let distDecay: Double = depth <= 3.0 ? 1.0 : max(0.3, 1.0 - Double(depth - 3.0) / 10.0)
+
+                // 복합 가중치: 신뢰도 × 기울기 × 거리감쇠
+                let confWeight = confLevelBase * tiltQuality * distDecay
 
                 // 카메라 좌표 → 월드 좌표 변환
                 let z  = depth
@@ -418,7 +461,7 @@ class LiDARScanner: NSObject, ARSessionDelegate {
                 depthBuffer:      depthBuf,
                 confidenceBuffer: confBuf,
                 minDepth:  0.15,
-                maxDepth:  4.0,
+                maxDepth:  10.0,
                 tiltPitch: pitch,
                 tiltRoll:  roll
             ) else { return }
@@ -561,7 +604,9 @@ class LiDARScanner: NSObject, ARSessionDelegate {
             tiltRoll:   avgRoll,
             totalPointCount: totalContributedPoints,
             originX: gridOriginX,
-            originZ: gridOriginZ
+            originZ: gridOriginZ,
+            groundY: Double(detectedGroundY),
+            cameraHeight: Double(estimatedCameraHeight)
         )
 
         // 1. 빈 셀 보간
@@ -576,27 +621,31 @@ class LiDARScanner: NSObject, ARSessionDelegate {
         onScanComplete?(heightMap)
     }
 
-    // MARK: - Filters
+    // MARK: - Filters (Accelerate 최적화)
 
-    /// 3×3 미디언 필터 - LiDAR 이상값 제거
+    /// 3×3 미디언 필터 - LiDAR 이상값 제거 (Accelerate vDSP 활용)
     private func applyMedianFilter(_ data: inout HeightMapData) {
         var filtered = data.heightMap
         let w = data.gridWidth, h = data.gridHeight
 
+        // vDSP를 사용한 일괄 정렬 대신, 행 단위 캐시 친화적 처리
+        var window = [Double](repeating: 0, count: 9)
         for y in 1 ..< (h - 1) {
             for x in 1 ..< (w - 1) {
                 guard data.getConfidence(x: x, y: y) > 0.01 else { continue }
-                var vals: [Double] = []
+                var count = 0
                 for dy in -1...1 {
                     for dx in -1...1 {
                         if data.getConfidence(x: x+dx, y: y+dy) > 0.01 {
-                            vals.append(data.getHeight(x: x+dx, y: y+dy))
+                            window[count] = data.getHeight(x: x+dx, y: y+dy)
+                            count += 1
                         }
                     }
                 }
-                if !vals.isEmpty {
-                    vals.sort()
-                    filtered[y * w + x] = vals[vals.count / 2]
+                if count > 0 {
+                    // vDSP 정렬 활용 (count가 작아 직접 정렬도 가능)
+                    vDSP_vsortD(&window, vDSP_Length(count), 1)  // ascending
+                    filtered[y * w + x] = window[count / 2]
                 }
             }
         }

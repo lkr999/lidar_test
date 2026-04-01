@@ -241,7 +241,7 @@ class TrajectoryOverlayView: UIView {
         }
     }
 
-    // MARK: - 30cm 격자 + 물 흐름 화살표 (탑뷰)
+    // MARK: - 30cm 격자 + 경사 강도 색상 물 흐름 화살표 (탑뷰)
 
     private func drawGridAndWaterFlow(ctx: CGContext, terrain: HeightMapData,
                                        sx: CGFloat, ox: CGFloat, oy: CGFloat) {
@@ -255,25 +255,24 @@ class TrajectoryOverlayView: UIView {
 
         var xi = 0.0
         while xi <= tw + 0.0001 {
-            let cx = CGFloat(xi) * sx + ox
-            ctx.move(to: CGPoint(x: cx, y: oy))
-            ctx.addLine(to: CGPoint(x: cx, y: CGFloat(th) * sx + oy))
+            let cxp = CGFloat(xi) * sx + ox
+            ctx.move(to: CGPoint(x: cxp, y: oy))
+            ctx.addLine(to: CGPoint(x: cxp, y: CGFloat(th) * sx + oy))
             ctx.strokePath()
             xi += spacing
         }
         var yi = 0.0
         while yi <= th + 0.0001 {
-            let cy = CGFloat(yi) * sx + oy
-            ctx.move(to: CGPoint(x: ox, y: cy))
-            ctx.addLine(to: CGPoint(x: CGFloat(tw) * sx + ox, y: cy))
+            let cyp = CGFloat(yi) * sx + oy
+            ctx.move(to: CGPoint(x: ox, y: cyp))
+            ctx.addLine(to: CGPoint(x: CGFloat(tw) * sx + ox, y: cyp))
             ctx.strokePath()
             yi += spacing
         }
 
-        // 물 흐름 화살표 (내부 교차점)
-        let arrowColor = UIColor(red: 0.15, green: 0.78, blue: 1.0, alpha: 0.90)
-        ctx.setFillColor(arrowColor.cgColor)
-        ctx.setStrokeColor(arrowColor.cgColor)
+        // 최대 경사 크기 사전 계산 (색상 정규화용)
+        let slopeInfo = TerrainAnalyzer.calculateSlopeMagnitudeMap(terrain: terrain, spacing: spacing)
+        let maxSlope = slopeInfo.maxSlope
 
         let maxLen = CGFloat(spacing) * sx * 0.40
 
@@ -281,11 +280,17 @@ class TrajectoryOverlayView: UIView {
         while gy < th - 0.0001 {
             var gx = spacing
             while gx < tw - 0.0001 {
-                let cx = Int(gx / terrain.cellSize)
-                let cy = Int(gy / terrain.cellSize)
-                let slope = TerrainAnalyzer.calculateHighPrecisionSlope(terrain: terrain, x: cx, y: cy)
+                let cxi = Int(gx / terrain.cellSize)
+                let cyi = Int(gy / terrain.cellSize)
+                let slope = TerrainAnalyzer.calculateHighPrecisionSlope(terrain: terrain, x: cxi, y: cyi)
                 let mag = slope.length
                 if mag > 0.003 {
+                    // 경사 크기에 따른 색상: 초록(완만) → 노랑(중간) → 빨강(급경사)
+                    let slopeRatio = min(mag / maxSlope, 1.0)
+                    let arrowColor = slopeGradientColor(ratio: slopeRatio)
+                    ctx.setFillColor(arrowColor.cgColor)
+                    ctx.setStrokeColor(arrowColor.cgColor)
+
                     let norm = slope.normalized()
                     let arrowLen = min(CGFloat(mag) * 450.0, maxLen)
                     let from = CGPoint(x: CGFloat(gx) * sx + ox, y: CGFloat(gy) * sx + oy)
@@ -390,27 +395,33 @@ class TrajectoryOverlayView: UIView {
         }
     }
 
-    // MARK: - 물 흐름 화살표 투영 (카메라 모드)
+    // MARK: - 경사 강도 색상 물 흐름 화살표 투영 (카메라 모드)
 
     private func drawProjectedWaterArrows(ctx: CGContext, terrain: HeightMapData) {
         let spacing = 0.30
         let tw = Double(terrain.gridWidth)  * terrain.cellSize
         let th = Double(terrain.gridHeight) * terrain.cellSize
 
-        let arrowColor = UIColor(red: 0.15, green: 0.78, blue: 1.0, alpha: 0.88)
-        ctx.setFillColor(arrowColor.cgColor)
-        ctx.setStrokeColor(arrowColor.cgColor)
+        // 최대 경사 크기 (색상 정규화)
+        let slopeInfo = TerrainAnalyzer.calculateSlopeMagnitudeMap(terrain: terrain, spacing: spacing)
+        let maxSlope = slopeInfo.maxSlope
 
         var gy = spacing
         while gy < th - 0.0001 {
             var gx = spacing
             while gx < tw - 0.0001 {
-                let cx = Int(gx / terrain.cellSize)
-                let cy = Int(gy / terrain.cellSize)
-                let slope = TerrainAnalyzer.calculateHighPrecisionSlope(terrain: terrain, x: cx, y: cy)
+                let cxi = Int(gx / terrain.cellSize)
+                let cyi = Int(gy / terrain.cellSize)
+                let slope = TerrainAnalyzer.calculateHighPrecisionSlope(terrain: terrain, x: cxi, y: cyi)
                 let mag = slope.length
                 if mag > 0.003, let center = gridPosToScreen(Vector2(x: gx, y: gy)) {
-                    let arrowM = min(mag * 5, 0.12)  // 최대 12cm 벡터
+                    // 경사 강도 색상 (초록→노랑→빨강)
+                    let slopeRatio = min(mag / maxSlope, 1.0)
+                    let arrowColor = slopeGradientColor(ratio: slopeRatio)
+                    ctx.setFillColor(arrowColor.cgColor)
+                    ctx.setStrokeColor(arrowColor.cgColor)
+
+                    let arrowM = min(mag * 5, 0.12)
                     let norm = slope.normalized()
                     let tipGrid = Vector2(x: gx + norm.x * arrowM, y: gy + norm.y * arrowM)
                     if let tip = gridPosToScreen(tipGrid) {
@@ -423,18 +434,26 @@ class TrajectoryOverlayView: UIView {
         }
     }
 
-    // MARK: - 등고선 (탑뷰)
+    // MARK: - 등고선 (탑뷰) — 절대 높이 기준 1cm 간격 + 레이블
 
     private func drawContourLines(ctx: CGContext, terrain: HeightMapData,
                                    sx: CGFloat, ox: CGFloat, oy: CGFloat) {
         let minH = terrain.minHeight, maxH = terrain.maxHeight
-        let range = max(maxH - minH, 0.0001)
-        let cs = terrain.cellSize * Double(sx)
-        ctx.setStrokeColor(UIColor.white.withAlphaComponent(0.38).cgColor)
+        // 절대 높이 기준 1cm 간격 등고선
+        let contourInterval = 0.01  // 1cm
+        ctx.setStrokeColor(UIColor.white.withAlphaComponent(0.45).cgColor)
         ctx.setLineWidth(0.9)
         let step = 2
-        for c in 0...10 {
-            let level = minH + range * Double(c) / 10.0
+
+        var level = (minH / contourInterval).rounded(.down) * contourInterval
+        while level <= maxH {
+            // 주 등고선 (5cm 간격)은 더 굵게
+            let isMajor = abs(level.remainder(dividingBy: 0.05)) < 0.001
+            ctx.setLineWidth(isMajor ? 1.6 : 0.7)
+            ctx.setStrokeColor(UIColor.white.withAlphaComponent(isMajor ? 0.55 : 0.30).cgColor)
+
+            var firstPtForLabel: CGPoint? = nil
+
             for y in stride(from: 0, to: terrain.gridHeight - 1, by: step) {
                 for x in stride(from: 0, to: terrain.gridWidth - 1, by: step) {
                     let h00 = terrain.getHeight(x: x, y: y)
@@ -461,9 +480,26 @@ class TrajectoryOverlayView: UIView {
                         let t = (level-h00)/(h01-h00)
                         add(Double(x)*terrain.cellSize, (Double(y)+t*Double(step))*terrain.cellSize)
                     }
-                    if pts.count >= 2 { ctx.move(to: pts[0]); ctx.addLine(to: pts[1]); ctx.strokePath() }
+                    if pts.count >= 2 {
+                        ctx.move(to: pts[0]); ctx.addLine(to: pts[1]); ctx.strokePath()
+                        if isMajor && firstPtForLabel == nil { firstPtForLabel = pts[0] }
+                    }
                 }
             }
+
+            // 주 등고선에 높이 레이블 (cm 단위)
+            if isMajor, let labelPt = firstPtForLabel {
+                let heightCm = (level - terrain.groundY) * 100.0
+                let label = String(format: "%.1fcm", heightCm)
+                let attrs: [NSAttributedString.Key: Any] = [
+                    .font: UIFont.systemFont(ofSize: 8, weight: .bold),
+                    .foregroundColor: UIColor.white.withAlphaComponent(0.70),
+                    .backgroundColor: UIColor.black.withAlphaComponent(0.45)
+                ]
+                (label as NSString).draw(at: CGPoint(x: labelPt.x + 2, y: labelPt.y - 10), withAttributes: attrs)
+            }
+
+            level += contourInterval
         }
     }
 
@@ -696,5 +732,20 @@ class TrajectoryOverlayView: UIView {
         let t = CGFloat(max(0, min(1, f)))
         return UIColor(red: r1+(r2-r1)*t, green: g1+(g2-g1)*t,
                        blue: b1+(b2-b1)*t, alpha: a1+(a2-a1)*t)
+    }
+
+    /// 경사 크기 비율에 따른 그라데이션 색상
+    /// ratio 0.0 → 초록(완만), 0.5 → 노랑(중간), 1.0 → 빨강(급경사)
+    private func slopeGradientColor(ratio: Double) -> UIColor {
+        let r = max(0, min(1, ratio))
+        if r < 0.5 {
+            // 초록 → 노랑
+            let t = r / 0.5
+            return UIColor(red: CGFloat(t), green: CGFloat(0.85), blue: CGFloat(0.15 * (1-t)), alpha: 0.90)
+        } else {
+            // 노랑 → 빨강
+            let t = (r - 0.5) / 0.5
+            return UIColor(red: CGFloat(1.0), green: CGFloat(0.85 * (1-t)), blue: 0, alpha: 0.90)
+        }
     }
 }

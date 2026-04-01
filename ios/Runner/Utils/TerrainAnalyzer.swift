@@ -103,4 +103,40 @@ class TerrainAnalyzer {
         let stimp = max(6.0, min(14.0, 14.0 - avgRoughness * 10000.0))
         return stimp
     }
+
+    /// Stimp → 저항(resistance) 자동 매핑
+    /// Stimp 6 (느림) → resistance 80%, Stimp 14 (빠름) → resistance 20%
+    static func stimpToResistance(stimp: Double) -> Double {
+        let clamped = max(6.0, min(14.0, stimp))
+        return 80.0 - (clamped - 6.0) / 8.0 * 60.0
+    }
+
+    /// 경사 크기 맵 생성 (각 그리드 포인트의 경사 크기)
+    /// 메쉬그리드 시각화에서 경사 벡터 색상 강도를 결정하는 데 사용
+    static func calculateSlopeMagnitudeMap(terrain: HeightMapData, spacing: Double = 0.30) -> (maxSlope: Double, slopeAtPoint: (_ gx: Int, _ gy: Int) -> Double) {
+        var globalMax = 0.0
+        let w = terrain.gridWidth, h = terrain.gridHeight
+
+        // 최대 경사 크기를 사전 계산
+        var gy = spacing
+        let tw = Double(w) * terrain.cellSize
+        let th = Double(h) * terrain.cellSize
+        while gy < th - 0.0001 {
+            var gx = spacing
+            while gx < tw - 0.0001 {
+                let cx = Int(gx / terrain.cellSize)
+                let cy = Int(gy / terrain.cellSize)
+                let slope = calculateHighPrecisionSlope(terrain: terrain, x: cx, y: cy)
+                globalMax = max(globalMax, slope.length)
+                gx += spacing
+            }
+            gy += spacing
+        }
+        let maxS = max(globalMax, 0.001)
+
+        return (maxSlope: maxS, slopeAtPoint: { gx, gy in
+            let slope = calculateHighPrecisionSlope(terrain: terrain, x: gx, y: gy)
+            return slope.length
+        })
+    }
 }

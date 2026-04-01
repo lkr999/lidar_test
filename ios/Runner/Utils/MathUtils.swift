@@ -57,6 +57,10 @@ struct HeightMapData {
     var originX: Double = 0
     /// 그리드 월드 좌표 원점 Z (mapToGrid 상대좌표 기준)
     var originZ: Double = 0
+    /// 감지된 지면 Y 좌표 (planeDetection 기반)
+    var groundY: Double = 0
+    /// 추정 카메라 높이 (지면 대비, 미터)
+    var cameraHeight: Double = 1.6
 
     var minHeight: Double {
         heightMap.min() ?? 0

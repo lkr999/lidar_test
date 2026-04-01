@@ -591,7 +591,11 @@ class MainViewController: UIViewController {
         let heightRange = TerrainAnalyzer.heightRange(terrain: heightMap)
         let stimp       = TerrainAnalyzer.estimateStimpSpeed(terrain: heightMap)
 
-        instructionLabel.text = String(format: "✅ 스캔 완료 | 높이차 %.2fm | Stimp %.1f", heightRange, stimp)
+        // Stimp → 저항값 자동 매핑 (수동 슬라이더 조정 최소화)
+        let autoResistance = TerrainAnalyzer.stimpToResistance(stimp: stimp)
+        resistancePercent = autoResistance
+
+        instructionLabel.text = String(format: "✅ 스캔 완료 | 높이차 %.2fm | Stimp %.1f | 저항 %.0f%%", heightRange, stimp, autoResistance)
 
         arView.debugOptions = []
 
