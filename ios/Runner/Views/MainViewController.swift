@@ -10,16 +10,19 @@ class MainViewController: UIViewController {
     // MARK: - AR Components
     private var arView: ARSCNView!
     private var scanner: LiDARScanner!
-    
+
     // MARK: - UI Components
     private var overlayView: ScanOverlayView!
     private var trajectoryOverlayView: TrajectoryOverlayView!
+    private var meshGrid3DView: MeshGrid3DView!
     private var statusBar: UIView!
     private var qualityLabel: UILabel!
     private var qualityBar: UIProgressView!
     private var scanButton: UIButton!
     private var measureButton: UIButton!
     private var resetButton: UIButton!
+    private var toggle3DButton: UIButton!
+    private var saveMapButton: UIButton!
     private var instructionLabel: UILabel!
     
     // MARK: - State
@@ -68,6 +71,12 @@ class MainViewController: UIViewController {
     private var adjustOverlay: PositionAdjustOverlay?
     private var pendingBallScreen: CGPoint?
     private var pendingHoleScreen: CGPoint?
+
+    // 3D 메쉬 뷰 상태
+    private var is3DViewVisible = false
+
+    // World Map 저장 키
+    private let worldMapKey = "com.lidar.putting.worldmap"
 
     enum AppState {
         case live            // 실시간 카메라
@@ -166,13 +175,22 @@ class MainViewController: UIViewController {
         // LiDAR·자이로 품질이 충분히 달성되면 자동 종료
         scanner.onAutoStopReady = { [weak self] in
             guard let self, self.currentState == .scanning else { return }
-            // 오버레이에 완료 배너 표시
             self.overlayView.update(
                 progress:      1.0,
                 quality:       self.currentQuality,
                 autoStopReady: true)
             self.instructionLabel.text = "✅ 품질 달성 – 자동 종료 중..."
             self.stopScanning()
+        }
+
+        // 실시간 스트리밍 메쉬 업데이트 (스캔 중 0.5초 간격)
+        scanner.onStreamingMeshUpdate = { [weak self] streamingTerrain in
+            guard let self, self.currentState == .scanning else { return }
+            self.trajectoryOverlayView.updateStreamingMesh(terrain: streamingTerrain)
+            if self.trajectoryOverlayView.isHidden {
+                self.trajectoryOverlayView.isHidden = false
+                self.view.insertSubview(self.trajectoryOverlayView, aboveSubview: self.overlayView)
+            }
         }
     }
     
@@ -185,9 +203,11 @@ class MainViewController: UIViewController {
         setupInstructionLabel()
         setupScanOverlay()
         setupTrajectoryOverlay()
+        setup3DMeshView()
         setupLevelIndicator()
         setupFrictionSlider()
         setupScanProgressBar()
+        loadSavedWorldMap()
     }
 
     /// 스캔 중 표시되는 품질 시각화 오버레이
@@ -315,6 +335,49 @@ class MainViewController: UIViewController {
         trajectoryOverlayView.isHidden = true
         trajectoryOverlayView.backgroundColor = .clear
         view.addSubview(trajectoryOverlayView)
+    }
+
+    /// SceneKit 3D 메쉬 뷰 (인터랙티브 회전/줌)
+    private func setup3DMeshView() {
+        meshGrid3DView = MeshGrid3DView(frame: view.bounds)
+        meshGrid3DView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        meshGrid3DView.isHidden = true
+        view.addSubview(meshGrid3DView)
+
+        // 3D 토글 버튼
+        toggle3DButton = UIButton(type: .system)
+        toggle3DButton.setTitle("3D", for: .normal)
+        toggle3DButton.titleLabel?.font = UIFont.systemFont(ofSize: 13, weight: .bold)
+        toggle3DButton.setTitleColor(.white, for: .normal)
+        toggle3DButton.backgroundColor = UIColor(red: 0.47, green: 0.33, blue: 0.82, alpha: 1)
+        toggle3DButton.layer.cornerRadius = 20
+        toggle3DButton.translatesAutoresizingMaskIntoConstraints = false
+        toggle3DButton.addTarget(self, action: #selector(toggle3DView), for: .touchUpInside)
+        toggle3DButton.isHidden = true
+        view.addSubview(toggle3DButton)
+
+        // World Map 저장 버튼
+        saveMapButton = UIButton(type: .system)
+        saveMapButton.setTitle("💾", for: .normal)
+        saveMapButton.titleLabel?.font = UIFont.systemFont(ofSize: 18)
+        saveMapButton.backgroundColor = UIColor.black.withAlphaComponent(0.6)
+        saveMapButton.layer.cornerRadius = 20
+        saveMapButton.translatesAutoresizingMaskIntoConstraints = false
+        saveMapButton.addTarget(self, action: #selector(saveWorldMapTapped), for: .touchUpInside)
+        saveMapButton.isHidden = true
+        view.addSubview(saveMapButton)
+
+        NSLayoutConstraint.activate([
+            toggle3DButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            toggle3DButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 70),
+            toggle3DButton.widthAnchor.constraint(equalToConstant: 40),
+            toggle3DButton.heightAnchor.constraint(equalToConstant: 40),
+
+            saveMapButton.leadingAnchor.constraint(equalTo: toggle3DButton.trailingAnchor, constant: 8),
+            saveMapButton.topAnchor.constraint(equalTo: toggle3DButton.topAnchor),
+            saveMapButton.widthAnchor.constraint(equalToConstant: 40),
+            saveMapButton.heightAnchor.constraint(equalToConstant: 40),
+        ])
     }
 
     private func setupLevelIndicator() {
@@ -495,6 +558,55 @@ class MainViewController: UIViewController {
         frictionLabel.text = "저항: \(val)%"
     }
 
+    @objc private func toggle3DView() {
+        guard let heightMap = currentHeightMap else { return }
+
+        is3DViewVisible.toggle()
+
+        if is3DViewVisible {
+            meshGrid3DView.configure(terrain: heightMap)
+
+            // 궤적이 있으면 3D에도 표시
+            if let ball = ballPosition, let hole = holePosition {
+                let physics = PuttingPhysics(terrain: heightMap, resistancePercent: resistancePercent)
+                let (_, result) = physics.findBestSpeedAndPath(ballPos: ball, holePos: hole)
+                meshGrid3DView.showTrajectory(result.trajectory, terrain: heightMap,
+                                               ballPos: ball, holePos: hole)
+            }
+
+            meshGrid3DView.isHidden = false
+            view.bringSubviewToFront(meshGrid3DView)
+            view.bringSubviewToFront(toggle3DButton)
+            view.bringSubviewToFront(statusBar)
+            for sv in view.subviews where sv is UIStackView { view.bringSubviewToFront(sv) }
+
+            toggle3DButton.setTitle("2D", for: .normal)
+            toggle3DButton.backgroundColor = UIColor(red: 0.09, green: 0.47, blue: 0.95, alpha: 1)
+        } else {
+            meshGrid3DView.isHidden = true
+            toggle3DButton.setTitle("3D", for: .normal)
+            toggle3DButton.backgroundColor = UIColor(red: 0.47, green: 0.33, blue: 0.82, alpha: 1)
+        }
+    }
+
+    @objc private func saveWorldMapTapped() {
+        instructionLabel.text = "💾 World Map 저장 중..."
+        scanner.saveWorldMap { [weak self] data in
+            guard let self else { return }
+            if let data {
+                UserDefaults.standard.set(data, forKey: self.worldMapKey)
+                self.instructionLabel.text = "✅ World Map 저장 완료 (\(data.count / 1024)KB)"
+            } else {
+                self.instructionLabel.text = "⚠️ World Map 저장 실패"
+            }
+        }
+    }
+
+    private func loadSavedWorldMap() {
+        guard let data = UserDefaults.standard.data(forKey: worldMapKey) else { return }
+        scanner.loadWorldMap(from: data)
+    }
+
     @objc private func frictionSliderFinished() {
         // 결과 화면에서 슬라이더 변경 시 자동 재계산
         if currentState == .result {
@@ -572,6 +684,10 @@ class MainViewController: UIViewController {
             capturedCompositeImage = capturedImage
         }
 
+        // 스트리밍 미리보기 중지
+        trajectoryOverlayView.stopStreaming()
+        trajectoryOverlayView.isHidden = true
+
         // 스캔 오버레이 & 진행률 바 숨기기
         overlayView.stopAnimation()
         overlayView.isHidden = true
@@ -598,6 +714,12 @@ class MainViewController: UIViewController {
         instructionLabel.text = String(format: "✅ 스캔 완료 | 높이차 %.2fm | Stimp %.1f | 저항 %.0f%%", heightRange, stimp, autoResistance)
 
         arView.debugOptions = []
+
+        // 3D 토글 + World Map 저장 버튼 표시
+        toggle3DButton.isHidden = false
+        saveMapButton.isHidden = false
+        view.bringSubviewToFront(toggle3DButton)
+        view.bringSubviewToFront(saveMapButton)
 
         // 깊이 합성 이미지를 배경으로 표시 (측정 참조 기반 이미지)
         if capturedImageView == nil {
@@ -940,9 +1062,57 @@ class MainViewController: UIViewController {
         
         let resistance = resistancePercent
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let physics = PuttingPhysics(terrain: heightMap, resistancePercent: resistance)
-            let (bestSpeed, result) = physics.findBestSpeedAndPath(ballPos: ball, holePos: hole)
-            
+            // LOD: 볼-홀 경로 주변을 고해상도(2.5cm)로 리샘플링하여 정밀 계산
+            let highResTerrain = heightMap.extractHighResCorridorLOD(
+                ballPos: ball, holePos: hole, corridorWidth: 1.0)
+
+            // 고해상도 그리드에서 볼/홀 좌표 변환
+            let lodHalfW = Double(highResTerrain.gridWidth) * highResTerrain.cellSize / 2.0
+            let lodHalfH = Double(highResTerrain.gridHeight) * highResTerrain.cellSize / 2.0
+            let origHalfW = Double(heightMap.gridWidth) * heightMap.cellSize / 2.0
+            let origHalfH = Double(heightMap.gridHeight) * heightMap.cellSize / 2.0
+
+            // 원본 좌표를 LOD 좌표로 변환
+            let lodBall = Vector2(
+                x: ball.x - (origHalfW - lodHalfW),
+                y: ball.y - (origHalfH - lodHalfH)
+            )
+            let lodHole = Vector2(
+                x: hole.x - (origHalfW - lodHalfW),
+                y: hole.y - (origHalfH - lodHalfH)
+            )
+
+            // LOD 범위 내에 있으면 고해상도 사용, 아니면 원본 사용
+            let useLOD = lodBall.x >= 0 && lodBall.y >= 0 &&
+                         lodHole.x >= 0 && lodHole.y >= 0 &&
+                         lodBall.x < Double(highResTerrain.gridWidth) * highResTerrain.cellSize &&
+                         lodHole.x < Double(highResTerrain.gridWidth) * highResTerrain.cellSize
+
+            let physics: PuttingPhysics
+            let bestSpeed: Double
+            let result: SimulationResult
+
+            if useLOD {
+                physics = PuttingPhysics(terrain: highResTerrain, resistancePercent: resistance)
+                let (spd, res) = physics.findBestSpeedAndPath(ballPos: lodBall, holePos: lodHole)
+                bestSpeed = spd
+                // 궤적을 원본 좌표계로 역변환
+                let offsetX = origHalfW - lodHalfW
+                let offsetY = origHalfH - lodHalfH
+                let remapped = res.trajectory.map { Vector2(x: $0.x + offsetX, y: $0.y + offsetY) }
+                result = SimulationResult(
+                    trajectory: remapped,
+                    aimDirection: res.aimDirection,
+                    finalDistance: res.finalDistance,
+                    breakAmount: res.breakAmount
+                )
+            } else {
+                physics = PuttingPhysics(terrain: heightMap, resistancePercent: resistance)
+                let (spd, res) = physics.findBestSpeedAndPath(ballPos: ball, holePos: hole)
+                bestSpeed = spd
+                result = res
+            }
+
             DispatchQueue.main.async {
                 self?.showResult(result: result, speed: bestSpeed)
             }
@@ -1026,11 +1196,16 @@ class MainViewController: UIViewController {
         // 정적 이미지 / 오버레이 숨기기
         capturedImageView?.isHidden = true
         trajectoryOverlayView.isHidden = true
+        trajectoryOverlayView.stopStreaming()
         levelIndicatorView.isHidden = true
         frictionContainer.isHidden = true
         overlayView.stopAnimation()
         overlayView.isHidden = true
         scanInfoContainer.isHidden = true
+        meshGrid3DView.isHidden = true
+        toggle3DButton.isHidden = true
+        saveMapButton.isHidden = true
+        is3DViewVisible = false
         scanProgressBar.setProgress(0, animated: false)
         scanProgressLabel.text = "데이터 수집: 0%"
         scanProgress = 0

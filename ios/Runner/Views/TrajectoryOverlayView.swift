@@ -27,6 +27,9 @@ class TrajectoryOverlayView: UIView {
     private var puttSpeed: Double = 0         // m/s
     private var resistancePercent: Double = 50 // 0~100
 
+    // 실시간 스트리밍 모드 (스캔 중 메쉬 미리보기)
+    private var isStreamingMode = false
+
     // MARK: - Animation
 
     private var displayLink: CADisplayLink?
@@ -42,6 +45,21 @@ class TrajectoryOverlayView: UIView {
     required init?(coder: NSCoder) { fatalError() }
 
     deinit { displayLink?.invalidate() }
+
+    // MARK: - Streaming Mode (실시간 스캔 미리보기)
+
+    /// 스캔 중 실시간 메쉬 미리보기 업데이트
+    func updateStreamingMesh(terrain: HeightMapData) {
+        self.terrain = terrain
+        self.isStreamingMode = true
+        self.trajectory = []
+        setNeedsDisplay()
+    }
+
+    /// 스트리밍 모드 종료
+    func stopStreaming() {
+        isStreamingMode = false
+    }
 
     // MARK: - Configure
 
@@ -61,6 +79,7 @@ class TrajectoryOverlayView: UIView {
         self.breakAmount  = breakAmount
         self.puttSpeed    = puttSpeed
         self.resistancePercent = resistancePercent
+        self.isStreamingMode = false
 
         animProgress = 0
         displayLink?.invalidate()
@@ -94,6 +113,12 @@ class TrajectoryOverlayView: UIView {
         guard let ctx = UIGraphicsGetCurrentContext(),
               let terrain = terrain else { return }
 
+        // 스트리밍 모드: 히트맵 + 격자만 표시 (궤적 없음)
+        if isStreamingMode {
+            drawStreamingPreview(ctx: ctx, rect: rect, terrain: terrain)
+            return
+        }
+
         let disp = makeDisplayTrajectory()
 
         if arCamera != nil && viewportSize.width > 0 {
@@ -101,6 +126,39 @@ class TrajectoryOverlayView: UIView {
         } else {
             drawTopDown(ctx: ctx, rect: rect, terrain: terrain, disp: disp)
         }
+    }
+
+    // MARK: - Streaming Preview (스캔 중 실시간 미리보기)
+
+    private func drawStreamingPreview(ctx: CGContext, rect: CGRect, terrain: HeightMapData) {
+        let tw = Double(terrain.gridWidth)  * terrain.cellSize
+        let th = Double(terrain.gridHeight) * terrain.cellSize
+        let sx = min(rect.width / CGFloat(tw), rect.height / CGFloat(th))
+        let ox = (rect.width  - CGFloat(tw) * sx) / 2
+        let oy = (rect.height - CGFloat(th) * sx) / 2
+
+        // 반투명 배경
+        ctx.setFillColor(UIColor.black.withAlphaComponent(0.25).cgColor)
+        ctx.fill(rect)
+
+        // 히트맵
+        drawHeightMapOverlay(ctx: ctx, terrain: terrain, sx: sx, ox: ox, oy: oy)
+
+        // 격자 + 물 흐름
+        drawGridAndWaterFlow(ctx: ctx, terrain: terrain, sx: sx, ox: ox, oy: oy)
+
+        // "실시간 스캔 중" 레이블
+        let label = "실시간 메쉬 미리보기"
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: 14, weight: .bold),
+            .foregroundColor: UIColor(red: 0.47, green: 0.84, blue: 1.0, alpha: 0.9),
+            .backgroundColor: UIColor.black.withAlphaComponent(0.5)
+        ]
+        let labelSize = (label as NSString).size(withAttributes: attrs)
+        (label as NSString).draw(
+            at: CGPoint(x: (rect.width - labelSize.width) / 2, y: rect.height - 50),
+            withAttributes: attrs
+        )
     }
 
     // MARK: - 투영 모드 (ARCamera)
