@@ -245,8 +245,10 @@ class MeshGrid3DView: UIView {
         // SCNGeometry 생성
         let vertexSource = SCNGeometrySource(vertices: vertices)
         let normalSource = SCNGeometrySource(normals: normals)
+        // SCNVector3 배열을 Data로 안전하게 변환
+        let colorData = colors.withUnsafeBytes { Data($0) }
         let colorSource  = SCNGeometrySource(
-            data: Data(bytes: colors, count: colors.count * MemoryLayout<SCNVector3>.stride),
+            data: colorData,
             semantic: .color,
             vectorCount: colors.count,
             usesFloatComponents: true,
@@ -416,18 +418,15 @@ class MeshGrid3DView: UIView {
         let parent = SCNNode()
         parent.position = from
 
-        // 화살표 샤프트 (실린더)
-        let shaftLen = length * 0.65
-        let shaft = SCNCylinder(radius: 0.003, height: CGFloat(shaftLen))
+        // 화살표 샤프트 (얇은 박스로 단순화 — 방향 정렬 안정성)
+        let shaftLen = CGFloat(length * 0.65)
+        let shaft = SCNBox(width: 0.005, height: 0.005, length: shaftLen, chamferRadius: 0)
         shaft.firstMaterial?.diffuse.contents = color
         shaft.firstMaterial?.lightingModel = .constant
         let shaftNode = SCNNode(geometry: shaft)
         shaftNode.position = SCNVector3(dx * 0.325, 0, dz * 0.325)
-
-        // 방향 정렬
-        let angle = atan2(dx, dz)
-        shaftNode.eulerAngles = SCNVector3(0, 0, Float.pi / 2)
-        shaftNode.pivot = SCNMatrix4MakeRotation(-angle, 0, 1, 0)
+        // XZ 평면에서 방향 정렬 (Y축 회전만 사용)
+        shaftNode.eulerAngles = SCNVector3(0, -atan2(dx, dz), 0)
         parent.addChildNode(shaftNode)
 
         // 화살촉 (원뿔)
@@ -436,6 +435,7 @@ class MeshGrid3DView: UIView {
         cone.firstMaterial?.lightingModel = .constant
         let coneNode = SCNNode(geometry: cone)
         coneNode.position = SCNVector3(dx * 0.825, 0, dz * 0.825)
+        coneNode.eulerAngles = SCNVector3(-atan2(dx, dz), 0, Float.pi / 2)
         parent.addChildNode(coneNode)
 
         return parent

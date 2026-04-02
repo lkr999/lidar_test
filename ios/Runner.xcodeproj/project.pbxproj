@@ -23,6 +23,7 @@
 		AA000001LIDAR000000000008 /* VisionDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001LIDAR000000000080 /* VisionDetector.swift */; };
 		AA000001LIDAR000000000009 /* PositionAdjustOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001LIDAR000000000090 /* PositionAdjustOverlay.swift */; };
 		AA000001LIDAR00000000000A /* DepthImageRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001LIDAR0000000000A0 /* DepthImageRenderer.swift */; };
+		AA000001LIDAR00000000000B /* MeshGrid3DView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001LIDAR0000000000B0 /* MeshGrid3DView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -69,6 +70,7 @@
 		AA000001LIDAR000000000070 /* TrajectoryOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrajectoryOverlayView.swift; sourceTree = "<group>"; };
 		AA000001LIDAR000000000080 /* VisionDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisionDetector.swift; sourceTree = "<group>"; };
 		AA000001LIDAR000000000090 /* PositionAdjustOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PositionAdjustOverlay.swift; sourceTree = "<group>"; };
+		AA000001LIDAR0000000000B0 /* MeshGrid3DView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshGrid3DView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -152,6 +154,7 @@
 				AA000001LIDAR000000000070 /* TrajectoryOverlayView.swift */,
 				AA000001LIDAR000000000080 /* VisionDetector.swift */,
 				AA000001LIDAR000000000090 /* PositionAdjustOverlay.swift */,
+				AA000001LIDAR0000000000B0 /* MeshGrid3DView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -278,6 +281,7 @@
 				AA000001LIDAR000000000008 /* VisionDetector.swift in Sources */,
 				AA000001LIDAR000000000009 /* PositionAdjustOverlay.swift in Sources */,
 				AA000001LIDAR00000000000A /* DepthImageRenderer.swift in Sources */,
+				AA000001LIDAR00000000000B /* MeshGrid3DView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
