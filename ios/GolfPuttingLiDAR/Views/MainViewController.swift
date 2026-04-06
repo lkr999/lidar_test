@@ -55,6 +55,7 @@ class MainViewController: UIViewController {
     private var frictionContainer: UIView!
     private var frictionSlider: UISlider!
     private var frictionLabel: UILabel!
+    private var resistanceDebounceTimer: Timer?
 
     // 수평 대기 상태 (true: 레벨 OK 시 자동 스캔 시작)
     private var waitingForLevel = false
@@ -427,7 +428,7 @@ class MainViewController: UIViewController {
         frictionSlider.minimumTrackTintColor = UIColor(red: 0.30, green: 0.69, blue: 0.31, alpha: 1)
         frictionSlider.maximumTrackTintColor = UIColor.white.withAlphaComponent(0.25)
         frictionSlider.addTarget(self, action: #selector(frictionSliderChanged), for: .valueChanged)
-        frictionSlider.addTarget(self, action: #selector(frictionSliderFinished), for: [.touchUpInside, .touchUpOutside])
+        frictionSlider.addTarget(self, action: #selector(frictionSliderFinished), for: [.touchUpInside, .touchUpOutside, .touchCancel])
         frictionContainer.addSubview(frictionSlider)
         frictionLabel.text = "저항: \(Int(savedResistance))%"
 
@@ -566,6 +567,15 @@ class MainViewController: UIViewController {
         let val = Int(frictionSlider.value)
         resistancePercent = Double(val)
         frictionLabel.text = "저항: \(val)%"
+
+        // 결과 화면에서 슬라이더 드래그 중 디바운스 재계산 (0.4초)
+        if currentState == .result {
+            resistanceDebounceTimer?.invalidate()
+            resistanceDebounceTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { [weak self] _ in
+                guard let self, self.currentState == .result else { return }
+                self.performMeasurement()
+            }
+        }
     }
 
     @objc private func toggle3DView() {
@@ -618,7 +628,9 @@ class MainViewController: UIViewController {
     }
 
     @objc private func frictionSliderFinished() {
-        // 결과 화면에서 슬라이더 변경 시 자동 재계산
+        // 디바운스 타이머 취소 후 즉시 재계산
+        resistanceDebounceTimer?.invalidate()
+        resistanceDebounceTimer = nil
         if currentState == .result {
             performMeasurement()
         }
