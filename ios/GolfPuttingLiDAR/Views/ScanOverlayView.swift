@@ -2,7 +2,7 @@ import UIKit
 
 /// LiDAR 스캔 중 AR 뷰 위에 표시되는 오버레이
 ///
-/// - 스캔 가이드 타원 + 스윕 애니메이션
+/// - 스캔 가이드 직사각형 + 스윕 애니메이션
 /// - 5개 품질 지표 실시간 바 차트
 /// - 진행률 아크
 /// - 자동 종료 준비 배너
@@ -64,7 +64,7 @@ class ScanOverlayView: UIView {
         ctx.setFillColor(UIColor.black.withAlphaComponent(0.26).cgColor)
         ctx.fill(rect)
 
-        // 스캔 가이드 타원 (화면 중앙 약간 위)
+        // 스캔 가이드 직사각형 (화면 중앙 약간 위)
         let gw = rect.width  * 0.82
         let gh = rect.height * 0.56
         let gx = (rect.width  - gw) / 2
@@ -77,12 +77,14 @@ class ScanOverlayView: UIView {
             ? UIColor(red: 0.20, green: 0.90, blue: 0.20, alpha: pulse)
             : UIColor(red: 0.09, green: 0.47, blue: 0.95, alpha: pulse)
         ctx.setFillColor(glowColor.cgColor)
-        ctx.fillEllipse(in: guideRect.insetBy(dx: -12, dy: -12))
+        ctx.fill(guideRect.insetBy(dx: -12, dy: -12))
 
-        // 가이드 내부 투명 (카메라 그대로 보임)
-        ctx.setBlendMode(.clear)
-        ctx.fillEllipse(in: guideRect)
-        ctx.setBlendMode(.normal)
+        // 가이드 내부 채움 (직사각형 스캔 영역 강조)
+        let fillColor: UIColor = autoStopReady
+            ? UIColor(red: 0.18, green: 0.75, blue: 0.18, alpha: 0.22)
+            : UIColor(red: 0.09, green: 0.47, blue: 0.95, alpha: 0.18)
+        ctx.setFillColor(fillColor.cgColor)
+        ctx.fill(guideRect)
 
         // 가이드 테두리 색상
         let borderColor: UIColor = autoStopReady
@@ -92,7 +94,7 @@ class ScanOverlayView: UIView {
                 : UIColor(red: 1.00, green: 0.76, blue: 0.03, alpha: 1.0))
         ctx.setStrokeColor(borderColor.cgColor)
         ctx.setLineWidth(2.5)
-        ctx.strokeEllipse(in: guideRect.insetBy(dx: 1.25, dy: 1.25))
+        ctx.stroke(guideRect.insetBy(dx: 1.25, dy: 1.25))
 
         // 나침반 방향 눈금
         drawTickMarks(ctx: ctx, guideRect: guideRect, color: borderColor)
@@ -150,7 +152,7 @@ class ScanOverlayView: UIView {
         let ey = cy + ry * sin(animPhase)
 
         ctx.saveGState()
-        ctx.addEllipse(in: guideRect)
+        ctx.addRect(guideRect)
         ctx.clip()
 
         guard let grad = CGGradient(

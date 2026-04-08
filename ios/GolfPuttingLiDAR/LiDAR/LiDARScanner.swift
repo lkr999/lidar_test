@@ -31,6 +31,9 @@ class LiDARScanner: NSObject, ARSessionDelegate {
     private let targetGridWidth  = 400
     private let targetGridHeight = 400
     private let targetCellSize: Double = 0.05   // 5cm → 20m×20m 커버리지
+    // 스캔 ROI: 오버레이 가이드와 동일한 중앙 직사각형 비율
+    private let scanRectWidthRatio: Double = 0.82
+    private let scanRectHeightRatio: Double = 0.56
 
     // 프레임 축적 데이터
     private var accumulatedHeights:    [[Double]] = []
@@ -513,6 +516,11 @@ class LiDARScanner: NSObject, ARSessionDelegate {
         // step=1: 모든 픽셀 처리로 최대 정밀도
         let step = 1
         var localPoints = 0
+        let roiMinU = (1.0 - scanRectWidthRatio) * 0.5
+        let roiMaxU = 1.0 - roiMinU
+        let roiCenterV = 0.5 - (18.0 / 844.0) // 오버레이의 상단 오프셋(-18pt)와 동일한 중심 보정
+        let roiMinV = roiCenterV - (scanRectHeightRatio * 0.5)
+        let roiMaxV = roiCenterV + (scanRectHeightRatio * 0.5)
 
         // 카메라 높이에 따른 유효 최대 거리 동적 계산 (바로미터 융합 높이 사용)
         let effectiveHeight = max(estimatedCameraHeight, fusedCameraHeight)
@@ -520,6 +528,10 @@ class LiDARScanner: NSObject, ARSessionDelegate {
 
         for v in stride(from: 0, to: dh, by: step) {
             for u in stride(from: 0, to: dw, by: step) {
+                let nu = Double(u) / Double(dw)
+                let nv = Double(v) / Double(dh)
+                guard nu >= roiMinU, nu <= roiMaxU, nv >= roiMinV, nv <= roiMaxV else { continue }
+
                 let idx        = v * dw + u
                 let depth      = depthPtr[idx]
                 let confidence = confPtr[idx]
