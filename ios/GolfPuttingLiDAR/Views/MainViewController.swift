@@ -60,7 +60,7 @@ class MainViewController: UIViewController {
     // 수평 대기 상태 (true: 레벨 OK 시 자동 스캔 시작)
     private var waitingForLevel = false
 
-    // 스캔 정체 감지 (3초 이상 커버리지 변화 없으면 자동 완료)
+    // 스캔 정체 감지 (1초 이상 커버리지 변화 없으면 자동 완료)
     private var lastCoverageForStall: Double = -1
     private var lastCoverageChangeTime: Date = Date()
     private var scanStartTime: Date = Date()
@@ -1284,14 +1284,14 @@ class MainViewController: UIViewController {
         scanProgressLabel.text = String(format: "데이터 수집: %.0f%%  (신뢰도 %.0f%%)",
             coverage * 100, quality.averageConfidence * 100)
 
-        // ── 3초 정체 감지: 커버리지 변화 없으면 자동 완료 ──────────────
+        // ── 1초 정체 감지: 커버리지 변화 없으면 자동 완료 ──────────────
         if abs(coverage - lastCoverageForStall) > 0.002 {
             lastCoverageForStall   = coverage
             lastCoverageChangeTime = Date()
         }
         let stallSeconds  = Date().timeIntervalSince(lastCoverageChangeTime)
         let scanDuration  = Date().timeIntervalSince(scanStartTime)
-        if stallSeconds >= 3.0 && coverage > 0.05 && scanDuration >= 3.0 {
+        if stallSeconds >= 1.0 && coverage > 0.05 && scanDuration >= 1.0 {
             instructionLabel.text = "⏸ 데이터 수집 정체 – 자동 완료"
             stopScanning()
         }

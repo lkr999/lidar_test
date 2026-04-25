@@ -27,10 +27,10 @@ class LiDARScanner: NSObject, ARSessionDelegate {
     private let session: ARSession
     private var isScanning = false
 
-    // 높이 맵 그리드 설정 (20m×20m, 5cm 해상도)
-    private let targetGridWidth  = 400
-    private let targetGridHeight = 400
-    private let targetCellSize: Double = 0.05   // 5cm → 20m×20m 커버리지
+    // 높이 맵 그리드 설정 (8m×8m, 5cm 해상도)
+    private let targetGridWidth  = 160
+    private let targetGridHeight = 160
+    private let targetCellSize: Double = 0.05   // 5cm → 8m×8m 커버리지
     // 스캔 ROI: 오버레이 가이드와 동일한 중앙 직사각형 비율
     private let scanRectWidthRatio: Double = 0.82
     private let scanRectHeightRatio: Double = 0.56
@@ -80,7 +80,8 @@ class LiDARScanner: NSObject, ARSessionDelegate {
     private var lastPanCameraX: Double = 0
     private var lastPanCameraZ: Double = 0
     /// 그리드 패닝 임계 거리 (카메라가 그리드 중심에서 이 거리 이상 이동 시 패닝)
-    private let gridPanThreshold: Double = 4.0
+    /// 8m 그리드(half-range 4m)의 ~37% 수준으로 설정해 가장자리 데이터 손실 방지
+    private let gridPanThreshold: Double = 1.5
 
     // ── 커버리지 증분 추적 (O(1) 업데이트) ──────────────────────────────
     private var filledCellCount = 0
