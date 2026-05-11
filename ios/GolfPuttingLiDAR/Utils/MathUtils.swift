@@ -241,35 +241,6 @@ struct HeightMapData {
         return extractHighResSubRegion(center: mid, radius: radius, targetCellSize: 0.025)
     }
 
-    // MARK: - 채워진 셀 빠른 반복 (스파스 최적화)
-
-    /// 신뢰도가 있는 셀만 순회하는 인덱스 배열 반환
-    func filledCellIndices() -> [Int] {
-        var indices: [Int] = []
-        indices.reserveCapacity(gridWidth * gridHeight / 4)
-        for i in 0..<heightMap.count {
-            if confidenceMap[i] > 0.01 { indices.append(i) }
-        }
-        return indices
-    }
-
-    /// 특정 영역의 평균 높이 (Accelerate vDSP 가속)
-    func averageHeightInRegion(x: Int, y: Int, radius: Int) -> Double {
-        var values: [Double] = []
-        for dy in -radius...radius {
-            for dx in -radius...radius {
-                let nx = x + dx, ny = y + dy
-                guard nx >= 0, nx < gridWidth,
-                      ny >= 0, ny < gridHeight,
-                      getConfidence(x: nx, y: ny) > 0.01 else { continue }
-                values.append(getHeight(x: nx, y: ny))
-            }
-        }
-        guard !values.isEmpty else { return getHeight(x: x, y: y) }
-        var mean: Double = 0
-        vDSP_meanvD(values, 1, &mean, vDSP_Length(values.count))
-        return mean
-    }
 }
 
 // MARK: - 시뮬레이션 결과
