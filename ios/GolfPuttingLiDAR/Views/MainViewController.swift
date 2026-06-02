@@ -83,6 +83,12 @@ class MainViewController: UIViewController {
 
     // World Map 저장 키
     private let worldMapKey = "com.lidar.putting.worldmap"
+    private var worldMapURL: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent("GolfPuttingLiDAR", isDirectory: true)
+            .appendingPathComponent("worldmap.arexperience")
+    }
 
     enum AppState {
         case live            // 실시간 카메라
@@ -178,14 +184,14 @@ class MainViewController: UIViewController {
             self.capturedDepthImage = depthImage
         }
 
-        // LiDAR·자이로 품질이 충분히 달성되면 자동 종료
+        // LiDAR 수집이 충분하거나 스캔 시작 기준 5초 완료 제한에 맞춰 자동 종료
         scanner.onAutoStopReady = { [weak self] in
             guard let self, self.currentState == .scanning else { return }
             self.overlayView.update(
                 progress:      1.0,
                 quality:       self.currentQuality,
                 autoStopReady: true)
-            self.instructionLabel.text = "✅ 품질 달성 – 자동 종료 중..."
+            self.instructionLabel.text = "✅ 데이터 수집 완료 – 처리 중..."
             self.stopScanning()
         }
 
@@ -612,19 +618,37 @@ class MainViewController: UIViewController {
     @objc private func saveWorldMapTapped() {
         instructionLabel.text = "💾 World Map 저장 중..."
         scanner.saveWorldMap { [weak self] data in
-            guard let self else { return }
-            if let data {
-                UserDefaults.standard.set(data, forKey: self.worldMapKey)
-                self.instructionLabel.text = "✅ World Map 저장 완료 (\(data.count / 1024)KB)"
-            } else {
-                self.instructionLabel.text = "⚠️ World Map 저장 실패"
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard let data, let url = self.worldMapURL else {
+                    self.instructionLabel.text = "⚠️ World Map 저장 실패"
+                    return
+                }
+
+                do {
+                    try FileManager.default.createDirectory(
+                        at: url.deletingLastPathComponent(),
+                        withIntermediateDirectories: true
+                    )
+                    try data.write(to: url, options: .atomic)
+                    UserDefaults.standard.removeObject(forKey: self.worldMapKey)
+                    self.instructionLabel.text = "✅ World Map 저장 완료 (\(data.count / 1024)KB)"
+                } catch {
+                    self.instructionLabel.text = "⚠️ World Map 저장 실패"
+                }
             }
         }
     }
 
     private func loadSavedWorldMap() {
-        guard let data = UserDefaults.standard.data(forKey: worldMapKey) else { return }
-        scanner.loadWorldMap(from: data)
+        if let url = worldMapURL, let data = try? Data(contentsOf: url) {
+            scanner.loadWorldMap(from: data)
+            return
+        }
+
+        // 이전 버전 호환: UserDefaults에 저장된 맵이 있으면 한 번 로드한다.
+        guard let legacyData = UserDefaults.standard.data(forKey: worldMapKey) else { return }
+        scanner.loadWorldMap(from: legacyData)
     }
 
     @objc private func frictionSliderFinished() {
@@ -672,7 +696,7 @@ class MainViewController: UIViewController {
         view.bringSubviewToFront(instructionLabel)
         for sv in view.subviews where sv is UIStackView { view.bringSubviewToFront(sv) }
 
-        arView.debugOptions = [.showWorldOrigin]
+        arView.debugOptions = []
     }
     
     private func stopScanning() {
@@ -726,14 +750,14 @@ class MainViewController: UIViewController {
         levelIndicatorView.isHidden = true
 
         // 분석 결과 → 안내 라벨에 표시
-        let heightRange = TerrainAnalyzer.heightRange(terrain: heightMap)
+        let heightRangeCm = TerrainAnalyzer.heightRange(terrain: heightMap)
         let stimp       = TerrainAnalyzer.estimateStimpSpeed(terrain: heightMap)
 
         // Stimp → 저항값 자동 매핑 (수동 슬라이더 조정 최소화)
         let autoResistance = TerrainAnalyzer.stimpToResistance(stimp: stimp)
         resistancePercent = autoResistance
 
-        instructionLabel.text = String(format: "✅ 스캔 완료 | 높이차 %.2fm | Stimp %.1f | 저항 %.0f%%", heightRange, stimp, autoResistance)
+        instructionLabel.text = String(format: "✅ 스캔 완료 | 높이차 %.1fcm | Stimp %.1f | 저항 %.0f%%", heightRangeCm, stimp, autoResistance)
 
         arView.debugOptions = []
 
@@ -760,7 +784,7 @@ class MainViewController: UIViewController {
         view.bringSubviewToFront(frictionContainer)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            self?.showManualPlacementForBall()
+            self?.startAutoDetection()
         }
     }
     
@@ -1016,7 +1040,7 @@ class MainViewController: UIViewController {
             let gyC = max(0, min(gy, hm.gridHeight - 1))
             return SIMD3<Float>(
                 Float(Double(gx) * hm.cellSize - rx + hm.originX),
-                Float(hm.getHeight(x: gxC, y: gyC)),
+                Float(hm.getHeight(x: gxC, y: gyC) + hm.groundY),
                 Float(Double(gy) * hm.cellSize - rz + hm.originZ)
             )
         }
@@ -1088,40 +1112,23 @@ class MainViewController: UIViewController {
             let highResTerrain = heightMap.extractHighResCorridorLOD(
                 ballPos: ball, holePos: hole, corridorWidth: 1.0)
 
-            // 고해상도 그리드에서 볼/홀 좌표 변환
-            let lodHalfW = Double(highResTerrain.gridWidth) * highResTerrain.cellSize / 2.0
-            let lodHalfH = Double(highResTerrain.gridHeight) * highResTerrain.cellSize / 2.0
-            let origHalfW = Double(heightMap.gridWidth) * heightMap.cellSize / 2.0
-            let origHalfH = Double(heightMap.gridHeight) * heightMap.cellSize / 2.0
-
-            // 원본 좌표를 LOD 좌표로 변환
-            let lodBall = Vector2(
-                x: ball.x - (origHalfW - lodHalfW),
-                y: ball.y - (origHalfH - lodHalfH)
-            )
-            let lodHole = Vector2(
-                x: hole.x - (origHalfW - lodHalfW),
-                y: hole.y - (origHalfH - lodHalfH)
-            )
+            // 원본 그리드 좌표를 LOD 내부 좌표로 변환
+            let lodBall = highResTerrain.parentToLocal(ball)
+            let lodHole = highResTerrain.parentToLocal(hole)
 
             // LOD 범위 내에 있으면 고해상도 사용, 아니면 원본 사용
-            let useLOD = lodBall.x >= 0 && lodBall.y >= 0 &&
-                         lodHole.x >= 0 && lodHole.y >= 0 &&
-                         lodBall.x < Double(highResTerrain.gridWidth) * highResTerrain.cellSize &&
-                         lodHole.x < Double(highResTerrain.gridWidth) * highResTerrain.cellSize
+            let useLOD = highResTerrain.containsLocal(lodBall) &&
+                         highResTerrain.containsLocal(lodHole)
 
-            let physics: PuttingPhysics
             let bestSpeed: Double
             let result: SimulationResult
 
             if useLOD {
-                physics = PuttingPhysics(terrain: highResTerrain, resistancePercent: resistance)
+                let physics = PuttingPhysics(terrain: highResTerrain, resistancePercent: resistance)
                 let (spd, res) = physics.findBestSpeedAndPath(ballPos: lodBall, holePos: lodHole)
                 bestSpeed = spd
                 // 궤적을 원본 좌표계로 역변환
-                let offsetX = origHalfW - lodHalfW
-                let offsetY = origHalfH - lodHalfH
-                let remapped = res.trajectory.map { Vector2(x: $0.x + offsetX, y: $0.y + offsetY) }
+                let remapped = res.trajectory.map { highResTerrain.localToParent($0) }
                 result = SimulationResult(
                     trajectory: remapped,
                     aimDirection: res.aimDirection,
@@ -1129,7 +1136,7 @@ class MainViewController: UIViewController {
                     breakAmount: res.breakAmount
                 )
             } else {
-                physics = PuttingPhysics(terrain: heightMap, resistancePercent: resistance)
+                let physics = PuttingPhysics(terrain: heightMap, resistancePercent: resistance)
                 let (spd, res) = physics.findBestSpeedAndPath(ballPos: ball, holePos: hole)
                 bestSpeed = spd
                 result = res
@@ -1284,14 +1291,14 @@ class MainViewController: UIViewController {
         scanProgressLabel.text = String(format: "데이터 수집: %.0f%%  (신뢰도 %.0f%%)",
             coverage * 100, quality.averageConfidence * 100)
 
-        // ── 1초 정체 감지: 커버리지 변화 없으면 자동 완료 ──────────────
+        // ── 초단기 자동 수집: 커버리지 변화가 멈추고 기본 데이터가 확보되면 즉시 완료 ──────────────
         if abs(coverage - lastCoverageForStall) > 0.002 {
             lastCoverageForStall   = coverage
             lastCoverageChangeTime = Date()
         }
         let stallSeconds  = Date().timeIntervalSince(lastCoverageChangeTime)
         let scanDuration  = Date().timeIntervalSince(scanStartTime)
-        if stallSeconds >= 1.0 && coverage > 0.05 && scanDuration >= 1.0 {
+        if stallSeconds >= 0.35 && coverage > 0.35 && scanDuration >= 0.9 {
             instructionLabel.text = "⏸ 데이터 수집 정체 – 자동 완료"
             stopScanning()
         }
@@ -1302,9 +1309,6 @@ class MainViewController: UIViewController {
         if currentState == .scanning {
             overlayView.update(progress: progress, quality: currentQuality)
             instructionLabel.text = "카메라 30° 유지하며 그린 표면을 스캔하세요"
-        }
-        if progress >= 1.0 && currentState == .scanning {
-            stopScanning()
         }
     }
     

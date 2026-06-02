@@ -113,7 +113,7 @@ class ScanOverlayView: UIView {
         // 자동 종료 배너
         if autoStopReady {
             drawBanner(ctx: ctx, rect: rect,
-                       text: "✅ 품질 달성 – 자동 종료 중...",
+                       text: "✅ 데이터 수집 완료 – 처리 중...",
                        color: UIColor(red: 0.15, green: 0.75, blue: 0.15, alpha: 0.93))
         }
     }
@@ -191,6 +191,7 @@ class ScanOverlayView: UIView {
             ("안정성",  quality.stabilityScore,    UIColor(red: 1.00, green: 0.85, blue: 0.20, alpha: 1)),
             ("조명",    quality.lightingScore,     UIColor(red: 1.00, green: 0.60, blue: 0.20, alpha: 1)),
             ("기울기",  quality.tiltScore,         UIColor(red: 0.85, green: 0.35, blue: 1.00, alpha: 1)),
+            ("반복",    min(1.0, quality.averageSamplesPerCell / 2.0), UIColor(red: 0.55, green: 0.90, blue: 1.00, alpha: 1)),
         ]
 
         let panelW: CGFloat = 218

@@ -1,16 +1,18 @@
 import Foundation
 
-/// 퍼팅 물리 엔진 - Quadratic Bezier 포물선 모델
+/// 퍼팅 물리 엔진 - 경사/마찰 기반 2D 수치 시뮬레이션
 ///
-/// 볼에서 홀까지 충분한 힘이 가해진다고 가정하며,
-/// 경사에 의한 횡방향 브레이크를 반영한 단순 포물선 경로를 생성합니다.
-///
-/// - 저항 0%  : slopeEffect = 1.0 → 경사 영향 최대 (최대 브레이크)
-/// - 저항 100%: slopeEffect = 0.0 → 경사 영향 없음 (직선)
+/// 여러 에임 각도와 초기 속도를 탐색한 뒤 컵 근접 오차가 가장 낮은 경로를 선택합니다.
+/// 저항값은 마찰 증가와 경사 영향 감소를 동시에 표현합니다.
 class PuttingPhysics {
 
     static let gravity: Double = 9.81
     static let baseFriction: Double = 0.065
+
+    private let cupRadius: Double = 0.054
+    private let maxCupEntrySpeed: Double = 1.35
+    private let timeStep: Double = 0.025
+    private let maxSimulationTime: Double = 8.0
 
     let terrain: HeightMapData
     let resistancePercent: Double  // 0~100
@@ -30,54 +32,174 @@ class PuttingPhysics {
         self.resistancePercent = max(0, min(100, resistancePercent))
     }
 
-    // MARK: - 횡경사 샘플링
+    // MARK: - Main Search
 
-    /// 볼→홀 경로를 따라 평균 횡경사(cross-slope) 샘플링
-    private func sampleAverageCrossSlope(from ball: Vector2, to hole: Vector2) -> Double {
-        let dir = hole - ball
-        let dist = dir.length
-        guard dist > 0.01 else { return 0 }
-        let directDir = dir.normalized()
-        let perpDir = Vector2(x: -directDir.y, y: directDir.x)
-
-        let sampleCount = max(5, Int(dist / 0.05))
-        var crossSlopeSum: Double = 0
-        var validSamples = 0
-
-        for i in 0...sampleCount {
-            let t = Double(i) / Double(sampleCount)
-            let pos = ball + dir * t
-            let gx = Int(pos.x / terrain.cellSize)
-            let gy = Int(pos.y / terrain.cellSize)
-            guard gx >= 0, gx < terrain.gridWidth,
-                  gy >= 0, gy < terrain.gridHeight else { continue }
-            let slope = TerrainAnalyzer.calculateHighPrecisionSlope(terrain: terrain, x: gx, y: gy)
-            crossSlopeSum += slope.dot(perpDir)
-            validSamples += 1
-        }
-
-        guard validSamples > 0 else { return 0 }
-        return crossSlopeSum / Double(validSamples)
-    }
-
-    // MARK: - Bezier 생성
-
-    /// Quadratic Bezier 포물선 궤적 생성 (40점)
-    private func generateBezier(ball: Vector2, hole: Vector2,
-                                  control: Vector2, pointCount: Int = 40) -> [Vector2] {
-        var pts: [Vector2] = []
-        for i in 0...pointCount {
-            let t = Double(i) / Double(pointCount)
-            let u = 1.0 - t
-            pts.append(Vector2(
-                x: u*u*ball.x + 2*u*t*control.x + t*t*hole.x,
-                y: u*u*ball.y + 2*u*t*control.y + t*t*hole.y
+    func findBestSpeedAndPath(ballPos: Vector2, holePos: Vector2)
+        -> (speed: Double, result: SimulationResult)
+    {
+        let toHole = holePos - ballPos
+        let distance = toHole.length
+        guard distance > 0.01 else {
+            return (0, SimulationResult(
+                trajectory: [ballPos, holePos],
+                aimDirection: .zero,
+                finalDistance: 0,
+                breakAmount: 0
             ))
         }
-        return pts
+
+        let directDir = toHole.normalized()
+        let baseSpeed = estimateLaunchSpeed(from: ballPos, to: holePos)
+        let angleLimit = slopeEffect < 0.001 ? 0 : min(.pi / 3.0, 0.14 + slopeEffect * 0.55)
+        let angleSteps = angleLimit == 0 ? 0 : 18
+        let speedSteps = 22
+
+        var best: (score: Double, speed: Double, result: SimulationResult)?
+
+        for ai in (-angleSteps)...angleSteps {
+            let angle = angleSteps == 0 ? 0 : angleLimit * Double(ai) / Double(angleSteps)
+            let aimDir = rotate(directDir, by: angle).normalized()
+
+            for si in 0..<speedSteps {
+                let multiplier = 0.72 + Double(si) * 0.045
+                let speed = baseSpeed * multiplier
+                let candidate = simulate(ballPos: ballPos, holePos: holePos, aimDir: aimDir, speed: speed)
+
+                if best == nil || candidate.score < best!.score {
+                    best = (candidate.score, speed, candidate.result)
+                }
+            }
+        }
+
+        guard let best else {
+            let fallbackSpeed = estimateLaunchSpeed(from: ballPos, to: holePos)
+            return (fallbackSpeed, SimulationResult(
+                trajectory: [ballPos, holePos],
+                aimDirection: directDir,
+                finalDistance: distance,
+                breakAmount: 0
+            ))
+        }
+
+        return (best.speed, best.result)
     }
 
-    // MARK: - Break 계산
+    // MARK: - Simulation
+
+    private func simulate(ballPos: Vector2, holePos: Vector2, aimDir: Vector2, speed: Double)
+        -> (score: Double, result: SimulationResult)
+    {
+        let directDistance = (holePos - ballPos).length
+        let maxSteps = Int(maxSimulationTime / timeStep)
+        var position = ballPos
+        var velocity = aimDir * speed
+        var points: [Vector2] = [ballPos]
+        points.reserveCapacity(160)
+
+        var closestDistance = directDistance
+        var entrySpeed = speed
+        var reachedCup = false
+
+        for step in 0..<maxSteps {
+            let speedNow = velocity.length
+            if speedNow < 0.025 { break }
+
+            let previous = position
+            let slope = terrainSlope(at: position)
+            let slopeAcceleration = slope * (PuttingPhysics.gravity * slopeEffect)
+            let frictionAcceleration = velocity.normalized() * (-effectiveFriction * PuttingPhysics.gravity)
+            let acceleration = slopeAcceleration + frictionAcceleration
+
+            velocity = velocity + acceleration * timeStep
+            position = position + velocity * timeStep
+
+            let distanceToCup = (position - holePos).length
+            if distanceToCup < closestDistance {
+                closestDistance = distanceToCup
+                entrySpeed = velocity.length
+            }
+
+            if segmentDistance(from: previous, to: position, point: holePos) <= cupRadius {
+                entrySpeed = velocity.length
+                closestDistance = 0
+                reachedCup = entrySpeed <= maxCupEntrySpeed
+                if reachedCup {
+                    points.append(holePos)
+                    break
+                }
+            }
+
+            if step % 2 == 0 {
+                points.append(position)
+            }
+
+            if !terrain.containsLocal(position) && (position - ballPos).length > directDistance * 1.2 {
+                break
+            }
+        }
+
+        if points.last.map({ ($0 - position).length > 0.001 }) ?? true {
+            points.append(position)
+        }
+
+        let trajectory = downsample(points, maxCount: 64)
+        let breakAmount = calculateBreak(trajectory: trajectory, start: ballPos, end: holePos)
+        let endDistance = (position - holePos).length
+        let speedPenalty = max(0, entrySpeed - maxCupEntrySpeed) * 0.08
+        let missPenalty = reachedCup ? 0 : min(endDistance, directDistance) * 0.18
+        let score = closestDistance + speedPenalty + missPenalty + breakAmount * 0.01
+
+        return (score, SimulationResult(
+            trajectory: trajectory,
+            aimDirection: aimDir,
+            finalDistance: closestDistance,
+            breakAmount: breakAmount
+        ))
+    }
+
+    private func estimateLaunchSpeed(from ball: Vector2, to hole: Vector2) -> Double {
+        let distance = max(0.01, (hole - ball).length)
+        let ballH = terrainHeight(at: ball)
+        let holeH = terrainHeight(at: hole)
+        let heightDelta = holeH - ballH
+        let workPerMass = effectiveFriction * PuttingPhysics.gravity * distance
+                        + PuttingPhysics.gravity * heightDelta
+        let speed = sqrt(max(0.04, 2.0 * workPerMass))
+        return max(0.25, min(speed * 1.08, 4.0))
+    }
+
+    private func terrainSlope(at position: Vector2) -> Vector2 {
+        guard terrain.containsLocal(position) else { return .zero }
+        let gx = Int(position.x / terrain.cellSize)
+        let gy = Int(position.y / terrain.cellSize)
+        return TerrainAnalyzer.calculateHighPrecisionSlope(terrain: terrain, x: gx, y: gy)
+    }
+
+    private func terrainHeight(at position: Vector2) -> Double {
+        let gx = Int(position.x / terrain.cellSize)
+        let gy = Int(position.y / terrain.cellSize)
+        return terrain.getHeight(x: gx, y: gy)
+    }
+
+    // MARK: - Geometry Helpers
+
+    private func rotate(_ vector: Vector2, by angle: Double) -> Vector2 {
+        let c = cos(angle)
+        let s = sin(angle)
+        return Vector2(
+            x: vector.x * c - vector.y * s,
+            y: vector.x * s + vector.y * c
+        )
+    }
+
+    private func segmentDistance(from a: Vector2, to b: Vector2, point p: Vector2) -> Double {
+        let ab = b - a
+        let abLen2 = ab.dot(ab)
+        guard abLen2 > 1e-9 else { return (p - a).length }
+        let t = max(0, min(1, (p - a).dot(ab) / abLen2))
+        let projection = a + ab * t
+        return (p - projection).length
+    }
 
     private func calculateBreak(trajectory: [Vector2], start: Vector2, end: Vector2) -> Double {
         guard trajectory.count >= 3 else { return 0 }
@@ -93,60 +215,14 @@ class PuttingPhysics {
         return maxPerp
     }
 
-    // MARK: - 메인 함수
-
-    /// Bezier 포물선으로 최적 경로와 에임 방향 계산
-    ///
-    /// 충분한 힘이 가해진다고 가정 → 볼이 감속 없이 홀까지 호를 그리며 도달
-    ///
-    /// - 저항 0%  : 경사 브레이크 최대, 에임이 크게 옆으로 향함
-    /// - 저항 100%: 직선 경로
-    func findBestSpeedAndPath(ballPos: Vector2, holePos: Vector2)
-        -> (speed: Double, result: SimulationResult)
-    {
-        let dir = holePos - ballPos
-        let distance = dir.length
-        let directDir = dir.normalized()
-        let perpDir = Vector2(x: -directDir.y, y: directDir.x)
-
-        // 초기 속도 계산 (유효 마찰 기반)
-        let speed = sqrt(2.0 * effectiveFriction * PuttingPhysics.gravity * distance) * 1.025
-
-        // 저항 100%: 직선
-        if slopeEffect < 0.001 {
-            return (speed, SimulationResult(
-                trajectory: [ballPos, holePos],
-                aimDirection: directDir,
-                finalDistance: 0,
-                breakAmount: 0
-            ))
+    private func downsample(_ points: [Vector2], maxCount: Int) -> [Vector2] {
+        guard points.count > maxCount, maxCount >= 2 else { return points }
+        var sampled: [Vector2] = []
+        sampled.reserveCapacity(maxCount)
+        for i in 0..<maxCount {
+            let sourceIndex = Int(round(Double(i) * Double(points.count - 1) / Double(maxCount - 1)))
+            sampled.append(points[min(points.count - 1, sourceIndex)])
         }
-
-        // 평균 횡경사 샘플링
-        let avgCrossSlope = sampleAverageCrossSlope(from: ballPos, to: holePos)
-
-        // 브레이크 = 횡경사 × 거리 × 경사영향계수
-        // 저항 0% → 최대, 저항 100% → 0
-        let breakAmount = avgCrossSlope * distance * slopeEffect
-
-        // Bezier 컨트롤 포인트: 중점에서 횡방향으로 오프셋
-        // (2× 곱하면 최대 편차 = breakAmount)
-        let mid = (ballPos + holePos) * 0.5
-        let controlPt = mid - perpDir * (2.0 * breakAmount)
-
-        // 단순 포물선 궤적 생성
-        let trajectory = generateBezier(ball: ballPos, hole: holePos, control: controlPt)
-
-        // 에임 방향 = Bezier 시작 접선 (ballPos → controlPt 방향)
-        let aimDirection = (controlPt - ballPos).normalized()
-
-        let breakAmt = calculateBreak(trajectory: trajectory, start: ballPos, end: holePos)
-
-        return (speed, SimulationResult(
-            trajectory: trajectory,
-            aimDirection: aimDirection,
-            finalDistance: 0,
-            breakAmount: breakAmt
-        ))
+        return sampled
     }
 }

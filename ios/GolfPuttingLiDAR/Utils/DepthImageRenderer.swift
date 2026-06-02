@@ -42,9 +42,12 @@ class DepthImageRenderer {
         guard let depthBase = CVPixelBufferGetBaseAddress(depthBuffer) else { return nil }
 
         let depthPtr = depthBase.assumingMemoryBound(to: Float32.self)
+        let depthStride = CVPixelBufferGetBytesPerRow(depthBuffer) / MemoryLayout<Float32>.stride
         var confPtr: UnsafePointer<UInt8>? = nil
+        var confStride = 0
         if let cb = confidenceBuffer, let base = CVPixelBufferGetBaseAddress(cb) {
             confPtr = UnsafePointer(base.assumingMemoryBound(to: UInt8.self))
+            confStride = CVPixelBufferGetBytesPerRow(cb)
         }
 
         let depthRange = maxDepth - minDepth
@@ -56,8 +59,8 @@ class DepthImageRenderer {
             for x in 0 ..< w {
                 let i   = y * w + x
                 let b4  = i * 4
-                let depth = depthPtr[i]
-                let conf  = confPtr?[i] ?? 2
+                let depth = depthPtr[y * depthStride + x]
+                let conf  = confPtr?[y * confStride + x] ?? 2
 
                 guard depth > minDepth && depth < maxDepth else {
                     // 유효 범위 밖 → 짙은 어두운색

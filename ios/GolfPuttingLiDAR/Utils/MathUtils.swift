@@ -35,6 +35,10 @@ struct Vector2 {
         Vector2(x: lhs.x * rhs, y: lhs.y * rhs)
     }
 
+    static func * (lhs: Double, rhs: Vector2) -> Vector2 {
+        Vector2(x: rhs.x * lhs, y: rhs.y * lhs)
+    }
+
     static func / (lhs: Vector2, rhs: Double) -> Vector2 {
         Vector2(x: lhs.x / rhs, y: lhs.y / rhs)
     }
@@ -47,6 +51,8 @@ struct HeightMapData {
     let cellSize: Double // meters
     var heightMap: [Double]
     var confidenceMap: [Double] // 각 셀의 신뢰도 (0~1)
+    /// 각 셀의 높이 불확실도(표준편차, meters). 값이 0이면 추정 불가 또는 단일 샘플.
+    var uncertaintyMap: [Double] = []
 
     /// 스캔 시 평균 pitch 각도 (도)
     var tiltPitch: Double = 0
@@ -62,13 +68,46 @@ struct HeightMapData {
     var groundY: Double = 0
     /// 추정 카메라 높이 (지면 대비, 미터)
     var cameraHeight: Double = 1.6
+    /// 이 HeightMap이 상위 그리드에서 시작하는 X 좌표(m). 원본 그리드는 0.
+    var localOriginX: Double = 0
+    /// 이 HeightMap이 상위 그리드에서 시작하는 Y/Z 좌표(m). 원본 그리드는 0.
+    var localOriginY: Double = 0
 
     var minHeight: Double {
-        heightMap.min() ?? 0
+        validHeightRange.min
     }
 
     var maxHeight: Double {
-        heightMap.max() ?? 0
+        validHeightRange.max
+    }
+
+    var widthMeters: Double {
+        Double(gridWidth) * cellSize
+    }
+
+    var heightMeters: Double {
+        Double(gridHeight) * cellSize
+    }
+
+    private var validHeightRange: (min: Double, max: Double) {
+        guard heightMap.count == confidenceMap.count else {
+            let fallback = heightMap.min() ?? 0
+            return (fallback, heightMap.max() ?? fallback)
+        }
+
+        var minH = Double.greatestFiniteMagnitude
+        var maxH = -Double.greatestFiniteMagnitude
+        var hasValid = false
+
+        for idx in heightMap.indices where confidenceMap[idx] > 0.01 {
+            minH = min(minH, heightMap[idx])
+            maxH = max(maxH, heightMap[idx])
+            hasValid = true
+        }
+
+        if hasValid { return (minH, maxH) }
+        let fallback = heightMap.min() ?? 0
+        return (fallback, heightMap.max() ?? fallback)
     }
 
     func getHeight(x: Int, y: Int) -> Double {
@@ -91,6 +130,19 @@ struct HeightMapData {
     mutating func setConfidence(x: Int, y: Int, value: Double) {
         guard x >= 0, x < gridWidth, y >= 0, y < gridHeight else { return }
         confidenceMap[y * gridWidth + x] = value
+    }
+
+    func containsLocal(_ point: Vector2) -> Bool {
+        point.x >= 0 && point.y >= 0 &&
+        point.x < widthMeters && point.y < heightMeters
+    }
+
+    func parentToLocal(_ point: Vector2) -> Vector2 {
+        Vector2(x: point.x - localOriginX, y: point.y - localOriginY)
+    }
+
+    func localToParent(_ point: Vector2) -> Vector2 {
+        Vector2(x: point.x + localOriginX, y: point.y + localOriginY)
     }
 
     /// 가우시안 스무딩 적용 (Accelerate vDSP 가속)
@@ -167,18 +219,23 @@ struct HeightMapData {
 
         var subHeight = [Double](repeating: 0, count: subGridSize * subGridSize)
         var subConf   = [Double](repeating: 0, count: subGridSize * subGridSize)
+        var subUncertainty = [Double](repeating: 0, count: subGridSize * subGridSize)
 
         let startX = center.x - radius
         let startY = center.y - radius
+        let originalHalfW = widthMeters / 2.0
+        let originalHalfH = heightMeters / 2.0
+        let subWidth = Double(subGridSize) * subCellSize
+        let subHeightMeters = Double(subGridSize) * subCellSize
 
         for sy in 0..<subGridSize {
             for sx in 0..<subGridSize {
-                let worldX = startX + Double(sx) * subCellSize
-                let worldY = startY + Double(sy) * subCellSize
+                let localX = startX + Double(sx) * subCellSize
+                let localY = startY + Double(sy) * subCellSize
 
                 // 원본 그리드에서 바이리니어 보간
-                let srcFX = worldX / cellSize
-                let srcFY = worldY / cellSize
+                let srcFX = localX / cellSize
+                let srcFY = localY / cellSize
                 let srcX0 = Int(floor(srcFX))
                 let srcY0 = Int(floor(srcFY))
                 let srcX1 = srcX0 + 1
@@ -208,6 +265,15 @@ struct HeightMapData {
                 let idx = sy * subGridSize + sx
                 subHeight[idx] = h
                 subConf[idx]   = c
+
+                if uncertaintyMap.count == heightMap.count {
+                    let u00 = uncertaintyMap[srcY0 * gridWidth + srcX0]
+                    let u10 = uncertaintyMap[srcY0 * gridWidth + srcX1]
+                    let u01 = uncertaintyMap[srcY1 * gridWidth + srcX0]
+                    let u11 = uncertaintyMap[srcY1 * gridWidth + srcX1]
+                    subUncertainty[idx] = u00 * (1-tx) * (1-ty) + u10 * tx * (1-ty) +
+                                          u01 * (1-tx) * ty     + u11 * tx * ty
+                }
             }
         }
 
@@ -217,13 +283,16 @@ struct HeightMapData {
             cellSize: subCellSize,
             heightMap: subHeight,
             confidenceMap: subConf,
+            uncertaintyMap: subUncertainty,
             tiltPitch: tiltPitch,
             tiltRoll: tiltRoll,
             totalPointCount: totalPointCount,
-            originX: originX + startX * cellSize,
-            originZ: originZ + startY * cellSize,
+            originX: originX + startX - originalHalfW + subWidth / 2.0,
+            originZ: originZ + startY - originalHalfH + subHeightMeters / 2.0,
             groundY: groundY,
-            cameraHeight: cameraHeight
+            cameraHeight: cameraHeight,
+            localOriginX: startX,
+            localOriginY: startY
         )
     }
 
@@ -268,28 +337,32 @@ struct MeasurementQuality {
     var stabilityScore: Double = 0
     var lightingScore: Double = 0
     var tiltScore: Double = 0
+    var averageSamplesPerCell: Double = 0
 
     var isOptimal: Bool {
-        averageConfidence > 0.7 &&
-        coveragePercent > 0.8 &&
-        stabilityScore > 0.6 &&
-        lightingScore > 0.5 &&
-        tiltScore > 0.25
+        averageConfidence > 0.55 &&
+        coveragePercent > 0.35 &&
+        stabilityScore > 0.25 &&
+        lightingScore > 0.2 &&
+        tiltScore > 0.12 &&
+        averageSamplesPerCell >= 1.2
     }
 
     var overallScore: Double {
-        (averageConfidence + coveragePercent + stabilityScore + lightingScore + tiltScore) / 5.0
+        let sampleScore = min(1.0, averageSamplesPerCell / 2.0)
+        return (averageConfidence + coveragePercent + stabilityScore + lightingScore + tiltScore + sampleScore) / 6.0
     }
 
     var statusMessage: String {
         if isOptimal { return "✅ 측정 준비 완료" }
 
         var issues: [String] = []
-        if averageConfidence <= 0.7 { issues.append("신뢰도 부족") }
-        if coveragePercent <= 0.8   { issues.append("커버리지 부족") }
-        if stabilityScore <= 0.6   { issues.append("기기 흔들림") }
-        if lightingScore <= 0.5    { issues.append("조명 부족") }
-        if tiltScore <= 0.25       { issues.append("카메라 각도 조정 필요") }
+        if averageConfidence <= 0.55 { issues.append("신뢰도 부족") }
+        if coveragePercent <= 0.35   { issues.append("커버리지 부족") }
+        if stabilityScore <= 0.25   { issues.append("기기 흔들림") }
+        if lightingScore <= 0.2    { issues.append("조명 부족") }
+        if tiltScore <= 0.12       { issues.append("카메라 각도 조정 필요") }
+        if averageSamplesPerCell < 1.2 { issues.append("반복 관측 부족") }
 
         return "⚠️ " + issues.joined(separator: ", ")
     }

@@ -29,6 +29,8 @@ class TrajectoryOverlayView: UIView {
 
     // 실시간 스트리밍 모드 (스캔 중 메쉬 미리보기)
     private var isStreamingMode = false
+    private var cachedSlopeMaxKey: String?
+    private var cachedSlopeMax: Double = 0
 
     // MARK: - Animation
 
@@ -53,6 +55,7 @@ class TrajectoryOverlayView: UIView {
         self.terrain = terrain
         self.isStreamingMode = true
         self.trajectory = []
+        invalidateTerrainCache()
         setNeedsDisplay()
     }
 
@@ -80,6 +83,7 @@ class TrajectoryOverlayView: UIView {
         self.puttSpeed    = puttSpeed
         self.resistancePercent = resistancePercent
         self.isStreamingMode = false
+        invalidateTerrainCache()
 
         animProgress = 0
         displayLink?.invalidate()
@@ -202,7 +206,7 @@ class TrajectoryOverlayView: UIView {
         // ③ 홀 마커 (start = 볼, end = 홀)
         if let holeScr = gridPosToScreen(holePos) { drawHoleMarker(ctx: ctx, at: holeScr) }
 
-        // ④ 볼 시작 마커 + 에임 화살표 (볼 → 홀 방향 → 50cm 연장)
+        // ④ 볼 시작 마커 + 에임 화살표 (공의 초기 출발 방향)
         if let ballScr = gridPosToScreen(ballPos) {
             drawStartMarker(ctx: ctx, at: ballScr)
             let aimEndWorld = aimEndPoint()
@@ -267,7 +271,7 @@ class TrajectoryOverlayView: UIView {
             drawBallMarker(ctx: ctx, at: cvt(disp[visCount - 1]), radius: 8)
         }
 
-        // ⑥ 볼 시작 마커 + 에임 화살표 (볼 → 홀 방향 → 50cm 연장)
+        // ⑥ 볼 시작 마커 + 에임 화살표 (공의 초기 출발 방향)
         let ballScr = cvt(ballPos)
         drawStartMarker(ctx: ctx, at: ballScr)
         let aimEndWorld = aimEndPoint()
@@ -328,37 +332,24 @@ class TrajectoryOverlayView: UIView {
             yi += spacing
         }
 
-        // 최대 경사 크기 사전 계산 (색상 정규화용)
-        let slopeInfo = TerrainAnalyzer.calculateSlopeMagnitudeMap(terrain: terrain, spacing: spacing)
-        let maxSlope = slopeInfo.maxSlope
-
-        let maxLen = CGFloat(spacing) * sx * 0.40
-
-        var gy = spacing
-        while gy < th - 0.0001 {
-            var gx = spacing
-            while gx < tw - 0.0001 {
-                let cxi = Int(gx / terrain.cellSize)
-                let cyi = Int(gy / terrain.cellSize)
-                let slope = TerrainAnalyzer.calculateHighPrecisionSlope(terrain: terrain, x: cxi, y: cyi)
-                let mag = slope.length
-                if mag > 0.003 {
-                    // 경사 크기에 따른 색상: 초록(완만) → 노랑(중간) → 빨강(급경사)
-                    let slopeRatio = min(mag / maxSlope, 1.0)
-                    let arrowColor = slopeGradientColor(ratio: slopeRatio)
-                    ctx.setFillColor(arrowColor.cgColor)
-                    ctx.setStrokeColor(arrowColor.cgColor)
-
-                    let norm = slope.normalized()
-                    let arrowLen = min(CGFloat(mag) * 450.0, maxLen)
-                    let from = CGPoint(x: CGFloat(gx) * sx + ox, y: CGFloat(gy) * sx + oy)
-                    let to   = CGPoint(x: from.x + CGFloat(norm.x) * arrowLen,
-                                       y: from.y + CGFloat(norm.y) * arrowLen)
-                    drawArrow(ctx: ctx, from: from, to: to, headFraction: 0.38)
-                }
-                gx += spacing
-            }
-            gy += spacing
+        if let path = slopeFocusPath() {
+            drawPathFocusedSlopeArrowsTopDown(
+                ctx: ctx,
+                terrain: terrain,
+                sx: sx,
+                ox: ox,
+                oy: oy,
+                path: path
+            )
+        } else {
+            drawUniformSlopeArrowsTopDown(
+                ctx: ctx,
+                terrain: terrain,
+                sx: sx,
+                ox: ox,
+                oy: oy,
+                spacing: spacing
+            )
         }
     }
 
@@ -457,25 +448,112 @@ class TrajectoryOverlayView: UIView {
 
     private func drawProjectedWaterArrows(ctx: CGContext, terrain: HeightMapData) {
         let spacing = 0.30
-        let tw = Double(terrain.gridWidth)  * terrain.cellSize
-        let th = Double(terrain.gridHeight) * terrain.cellSize
 
-        // 최대 경사 크기 (색상 정규화)
-        let slopeInfo = TerrainAnalyzer.calculateSlopeMagnitudeMap(terrain: terrain, spacing: spacing)
-        let maxSlope = slopeInfo.maxSlope
+        if let path = slopeFocusPath() {
+            drawPathFocusedSlopeArrowsProjected(ctx: ctx, terrain: terrain, path: path)
+        } else {
+            drawUniformSlopeArrowsProjected(ctx: ctx, terrain: terrain, spacing: spacing)
+        }
+    }
+
+    private func drawUniformSlopeArrowsTopDown(ctx: CGContext, terrain: HeightMapData,
+                                                sx: CGFloat, ox: CGFloat, oy: CGFloat,
+                                                spacing: Double) {
+        let maxSlope = cachedMaxSlope(for: terrain, spacing: spacing)
+        let maxLen = CGFloat(spacing) * sx * 0.40
+        let tw = terrain.widthMeters
+        let th = terrain.heightMeters
 
         var gy = spacing
         while gy < th - 0.0001 {
             var gx = spacing
             while gx < tw - 0.0001 {
-                let cxi = Int(gx / terrain.cellSize)
-                let cyi = Int(gy / terrain.cellSize)
-                let slope = TerrainAnalyzer.calculateHighPrecisionSlope(terrain: terrain, x: cxi, y: cyi)
+                let point = Vector2(x: gx, y: gy)
+                let slope = slopeAt(point, terrain: terrain)
                 let mag = slope.length
-                if mag > 0.003, let center = gridPosToScreen(Vector2(x: gx, y: gy)) {
-                    // 경사 강도 색상 (초록→노랑→빨강)
-                    let slopeRatio = min(mag / maxSlope, 1.0)
-                    let arrowColor = slopeGradientColor(ratio: slopeRatio)
+                if mag > 0.003 {
+                    let arrowColor = slopeGradientColor(ratio: min(mag / maxSlope, 1.0))
+                    ctx.setFillColor(arrowColor.cgColor)
+                    ctx.setStrokeColor(arrowColor.cgColor)
+
+                    let norm = slope.normalized()
+                    let arrowLen = min(CGFloat(mag) * 450.0, maxLen)
+                    let from = CGPoint(x: CGFloat(gx) * sx + ox, y: CGFloat(gy) * sx + oy)
+                    let to = CGPoint(
+                        x: from.x + CGFloat(norm.x) * arrowLen,
+                        y: from.y + CGFloat(norm.y) * arrowLen
+                    )
+                    drawArrow(ctx: ctx, from: from, to: to, headFraction: 0.38)
+                }
+                gx += spacing
+            }
+            gy += spacing
+        }
+    }
+
+    private func drawPathFocusedSlopeArrowsTopDown(ctx: CGContext, terrain: HeightMapData,
+                                                    sx: CGFloat, ox: CGFloat, oy: CGFloat,
+                                                    path: [Vector2]) {
+        let spacing = 0.12
+        let corridor = slopeArrowCorridorWidth(for: path)
+        let maxSlope = cachedMaxSlope(for: terrain, spacing: spacing)
+        let maxLen = CGFloat(spacing) * sx * 0.44
+        let tw = terrain.widthMeters
+        let th = terrain.heightMeters
+
+        var gy = spacing * 0.5
+        while gy < th - 0.0001 {
+            var gx = spacing * 0.5
+            while gx < tw - 0.0001 {
+                let point = Vector2(x: gx, y: gy)
+                let focus = slopePathFocus(at: point, path: path, corridor: corridor)
+                if focus > 0 {
+                    let slope = slopeAt(point, terrain: terrain)
+                    let mag = slope.length
+                    if mag > 0.0015 {
+                        let alpha = 0.30 + 0.62 * focus
+                        let arrowColor = slopeGradientColor(ratio: min(mag / maxSlope, 1.0))
+                            .withAlphaComponent(alpha)
+                        ctx.setFillColor(arrowColor.cgColor)
+                        ctx.setStrokeColor(arrowColor.cgColor)
+
+                        let norm = slope.normalized()
+                        let arrowLen = min(CGFloat(mag) * 360.0, maxLen) * CGFloat(0.72 + 0.30 * focus)
+                        let from = CGPoint(x: CGFloat(gx) * sx + ox, y: CGFloat(gy) * sx + oy)
+                        let to = CGPoint(
+                            x: from.x + CGFloat(norm.x) * arrowLen,
+                            y: from.y + CGFloat(norm.y) * arrowLen
+                        )
+                        drawArrow(
+                            ctx: ctx,
+                            from: from,
+                            to: to,
+                            headFraction: 0.32,
+                            lineWidth: CGFloat(0.75 + 0.75 * focus)
+                        )
+                    }
+                }
+                gx += spacing
+            }
+            gy += spacing
+        }
+    }
+
+    private func drawUniformSlopeArrowsProjected(ctx: CGContext, terrain: HeightMapData,
+                                                  spacing: Double) {
+        let maxSlope = cachedMaxSlope(for: terrain, spacing: spacing)
+        let tw = terrain.widthMeters
+        let th = terrain.heightMeters
+
+        var gy = spacing
+        while gy < th - 0.0001 {
+            var gx = spacing
+            while gx < tw - 0.0001 {
+                let point = Vector2(x: gx, y: gy)
+                let slope = slopeAt(point, terrain: terrain)
+                let mag = slope.length
+                if mag > 0.003, let center = gridPosToScreen(point) {
+                    let arrowColor = slopeGradientColor(ratio: min(mag / maxSlope, 1.0))
                     ctx.setFillColor(arrowColor.cgColor)
                     ctx.setStrokeColor(arrowColor.cgColor)
 
@@ -490,6 +568,117 @@ class TrajectoryOverlayView: UIView {
             }
             gy += spacing
         }
+    }
+
+    private func drawPathFocusedSlopeArrowsProjected(ctx: CGContext, terrain: HeightMapData,
+                                                      path: [Vector2]) {
+        let spacing = 0.15
+        let corridor = slopeArrowCorridorWidth(for: path)
+        let maxSlope = cachedMaxSlope(for: terrain, spacing: spacing)
+        let tw = terrain.widthMeters
+        let th = terrain.heightMeters
+
+        var gy = spacing * 0.5
+        while gy < th - 0.0001 {
+            var gx = spacing * 0.5
+            while gx < tw - 0.0001 {
+                let point = Vector2(x: gx, y: gy)
+                let focus = slopePathFocus(at: point, path: path, corridor: corridor)
+                if focus > 0 {
+                    let slope = slopeAt(point, terrain: terrain)
+                    let mag = slope.length
+                    if mag > 0.0015, let center = gridPosToScreen(point) {
+                        let alpha = 0.30 + 0.62 * focus
+                        let arrowColor = slopeGradientColor(ratio: min(mag / maxSlope, 1.0))
+                            .withAlphaComponent(alpha)
+                        ctx.setFillColor(arrowColor.cgColor)
+                        ctx.setStrokeColor(arrowColor.cgColor)
+
+                        let arrowM = min(mag * 4.2, spacing * 0.42) * (0.72 + 0.30 * focus)
+                        let norm = slope.normalized()
+                        let tipGrid = Vector2(x: gx + norm.x * arrowM, y: gy + norm.y * arrowM)
+                        if let tip = gridPosToScreen(tipGrid) {
+                            drawArrow(
+                                ctx: ctx,
+                                from: center,
+                                to: tip,
+                                headFraction: 0.32,
+                                lineWidth: CGFloat(0.75 + 0.75 * focus)
+                            )
+                        }
+                    }
+                }
+                gx += spacing
+            }
+            gy += spacing
+        }
+    }
+
+    private func slopeAt(_ point: Vector2, terrain: HeightMapData) -> Vector2 {
+        let gx = max(0, min(Int(point.x / terrain.cellSize), terrain.gridWidth - 1))
+        let gy = max(0, min(Int(point.y / terrain.cellSize), terrain.gridHeight - 1))
+        return TerrainAnalyzer.calculateHighPrecisionSlope(terrain: terrain, x: gx, y: gy)
+    }
+
+    private func slopeFocusPath() -> [Vector2]? {
+        guard !isStreamingMode, (holePos - ballPos).length > 0.01 else { return nil }
+        let displayPath = makeDisplayTrajectory()
+        guard displayPath.count >= 2 else { return [ballPos, holePos] }
+
+        if displayPath.count > 2,
+           let closestIndex = displayPath.indices.min(by: {
+               (displayPath[$0] - holePos).length < (displayPath[$1] - holePos).length
+           }),
+           closestIndex > 0 {
+            var trimmed = Array(displayPath.prefix(closestIndex + 1))
+            if let last = trimmed.last, (last - holePos).length > 0.08 {
+                trimmed.append(holePos)
+            } else {
+                trimmed[trimmed.count - 1] = holePos
+            }
+            return trimmed
+        }
+
+        return [ballPos, holePos]
+    }
+
+    private func slopeArrowCorridorWidth(for path: [Vector2]) -> Double {
+        let totalLength = pathLength(path)
+        return min(0.55, max(0.28, totalLength * 0.14))
+    }
+
+    private func slopePathFocus(at point: Vector2, path: [Vector2], corridor: Double) -> Double {
+        let distance = distanceToPath(point, path: path)
+        guard distance < corridor else { return 0 }
+        let normalized = max(0, 1.0 - distance / corridor)
+        return normalized * normalized
+    }
+
+    private func distanceToPath(_ point: Vector2, path: [Vector2]) -> Double {
+        guard path.count >= 2 else { return Double.greatestFiniteMagnitude }
+        var best = Double.greatestFiniteMagnitude
+        for idx in 1..<path.count {
+            best = min(best, distanceToSegment(point, start: path[idx - 1], end: path[idx]))
+        }
+        return best
+    }
+
+    private func distanceToSegment(_ point: Vector2, start: Vector2, end: Vector2) -> Double {
+        let segment = end - start
+        let len2 = segment.dot(segment)
+        guard len2 > 1e-9 else { return (point - start).length }
+        let t = max(0, min(1, (point - start).dot(segment) / len2))
+        let projected = start + segment * t
+        return (point - projected).length
+    }
+
+    private func pathLength(_ path: [Vector2]) -> Double {
+        guard path.count >= 2 else { return 0 }
+        var total = 0.0
+        for idx in 1..<path.count {
+            total += (path[idx] - path[idx - 1]).length
+        }
+        return total
     }
 
     // MARK: - 등고선 (탑뷰) — 절대 높이 기준 1cm 간격 + 레이블
@@ -547,7 +736,7 @@ class TrajectoryOverlayView: UIView {
 
             // 주 등고선에 높이 레이블 (cm 단위)
             if isMajor, let labelPt = firstPtForLabel {
-                let heightCm = (level - terrain.groundY) * 100.0
+                let heightCm = level * 100.0
                 let label = String(format: "%.1fcm", heightCm)
                 let attrs: [NSAttributedString.Key: Any] = [
                     .font: UIFont.systemFont(ofSize: 8, weight: .bold),
@@ -605,17 +794,28 @@ class TrajectoryOverlayView: UIView {
         ctx.restoreGState()
     }
 
-    /// 에임 방향 종점 계산: ballPos → aimDirection으로 홀을 50cm 지난 지점
+    /// 에임 방향 종점 계산: 공이 처음 출발해야 하는 방향만 짧게 표시
     private func aimEndPoint() -> Vector2 {
-        let toHole = holePos - ballPos
-        // aimDirection 방향으로 홀까지의 투영 거리
-        let dAlongAim = toHole.dot(aimDirection)
-        // 홀보다 50cm 더 멀리, 최소 0.4m 보장
-        let totalDist = max(dAlongAim, 0.4) + 0.5
-        return ballPos + aimDirection * totalDist
+        let dir = launchDirection()
+        let distance = max(puttDistance, (holePos - ballPos).length)
+        let guideLength = min(1.2, max(0.45, distance * 0.35))
+        return ballPos + dir * guideLength
     }
 
-    /// 붉은 점선 에임 화살표 (볼 → 홀 방향으로 50cm 연장)
+    private func launchDirection() -> Vector2 {
+        if aimDirection.length > 0.001 {
+            return aimDirection.normalized()
+        }
+
+        if let next = trajectory.first(where: { ($0 - ballPos).length > 0.01 }) {
+            return (next - ballPos).normalized()
+        }
+
+        let toHole = holePos - ballPos
+        return toHole.length > 0.001 ? toHole.normalized() : Vector2(x: 1, y: 0)
+    }
+
+    /// 붉은 점선 에임 화살표 (공의 초기 출발 방향)
     private func drawAimArrow(ctx: CGContext, from: CGPoint, to: CGPoint) {
         let dx = to.x - from.x, dy = to.y - from.y
         let len = sqrt(dx * dx + dy * dy)
@@ -652,7 +852,8 @@ class TrajectoryOverlayView: UIView {
 
     // MARK: - 화살표
 
-    private func drawArrow(ctx: CGContext, from: CGPoint, to: CGPoint, headFraction: CGFloat) {
+    private func drawArrow(ctx: CGContext, from: CGPoint, to: CGPoint,
+                           headFraction: CGFloat, lineWidth: CGFloat = 1.6) {
         let dx = to.x - from.x, dy = to.y - from.y
         let len = sqrt(dx*dx + dy*dy)
         guard len > 5 else { return }
@@ -660,7 +861,7 @@ class TrajectoryOverlayView: UIView {
         let headLen = len * headFraction
         let shaftEnd = CGPoint(x: to.x - nx*headLen, y: to.y - ny*headLen)
 
-        ctx.setLineWidth(1.6)
+        ctx.setLineWidth(lineWidth)
         ctx.move(to: from); ctx.addLine(to: shaftEnd); ctx.strokePath()
 
         let pw = headLen * 0.46
@@ -741,7 +942,7 @@ class TrajectoryOverlayView: UIView {
         let gy = min(t.gridHeight - 1, max(0, Int(pos.y / t.cellSize)))
         // 그리드 원점(originX/Z) 기반 월드 좌표 변환
         return SIMD3<Float>(Float(pos.x - rx + t.originX),
-                            Float(t.getHeight(x: gx, y: gy)),
+                            Float(t.getHeight(x: gx, y: gy) + t.groundY),
                             Float(pos.y - rz + t.originZ))
     }
 
@@ -760,6 +961,22 @@ class TrajectoryOverlayView: UIView {
     private func gridPosToScreen(_ pos: Vector2) -> CGPoint? {
         guard let w = gridToWorld3D(pos) else { return nil }
         return projectToScreen(w)
+    }
+
+    private func invalidateTerrainCache() {
+        cachedSlopeMaxKey = nil
+        cachedSlopeMax = 0
+    }
+
+    private func cachedMaxSlope(for terrain: HeightMapData, spacing: Double) -> Double {
+        let key = "\(terrain.gridWidth)x\(terrain.gridHeight):\(terrain.cellSize):\(spacing):\(terrain.totalPointCount):\(terrain.minHeight):\(terrain.maxHeight)"
+        if cachedSlopeMaxKey == key, cachedSlopeMax > 0 {
+            return cachedSlopeMax
+        }
+        let maxSlope = TerrainAnalyzer.calculateSlopeMagnitudeMap(terrain: terrain, spacing: spacing).maxSlope
+        cachedSlopeMaxKey = key
+        cachedSlopeMax = maxSlope
+        return maxSlope
     }
 
     // MARK: - 색상
