@@ -28,19 +28,25 @@ class LiDARScanner: NSObject, ARSessionDelegate {
     private let processingQueue = DispatchQueue(label: "lidar.processing.queue", qos: .userInitiated)
     private var isScanning = false
 
-    // 높이 맵 그리드 설정 (8m×8m, 5cm 해상도)
-    private let targetGridWidth  = 160
-    private let targetGridHeight = 160
-    private let targetCellSize: Double = 0.05   // 5cm → 8m×8m 커버리지
-    // 스캔 ROI: 오버레이 가이드와 동일한 중앙 직사각형 비율
+    // 높이 맵 그리드 설정 + 누적 버퍼 (8m×8m, 5cm 해상도)
+    // 누적/평균화 순수 로직은 TerrainGridAccumulator로 분리 (단위 테스트 가능)
+    private var grid = TerrainGridAccumulator(
+        gridWidth: 160, gridHeight: 160, cellSize: 0.05,
+        targetSamplesPerCell: 2
+    )
+    private var targetGridWidth:  Int    { grid.gridWidth }
+    private var targetGridHeight: Int    { grid.gridHeight }
+    private var targetCellSize:   Double { grid.cellSize }
+    // 스캔 ROI: 오버레이 가이드와 동일한 중앙 직사각형 비율 (ScanOverlayView.draw 참조)
     private let scanRectWidthRatio: Double = 0.82
     private let scanRectHeightRatio: Double = 0.56
+    /// 가이드 사각형의 화면 세로 중심 오프셋 (pt, ScanOverlayView와 동일)
+    private let scanRectCenterYOffset: Double = -18.0
 
-    // 프레임 축적 데이터 (flat buffer: index = z * width + x)
-    private var accumulatedHeights: [Double] = []
-    private var accumulatedHeightSquares: [Double] = []
-    private var accumulatedCounts: [Int] = []
-    private var accumulatedConfidence: [Double] = []
+    // ── ROI 매핑용 뷰포트 정보 (메인 뷰에서 설정) ─────────────────────────
+    /// AR 화면 뷰포트 크기. 화면 가이드 사각형을 깊이 맵 좌표로 역변환할 때 사용.
+    var viewportSize: CGSize = .zero
+    var viewportOrientation: UIInterfaceOrientation = .portrait
 
     // 포즈 / 조명 이력
     private var recentPoses:          [simd_float4x4] = []
@@ -53,8 +59,6 @@ class LiDARScanner: NSObject, ARSessionDelegate {
     private var maxDataCollectionDuration: TimeInterval {
         max(0.5, maxScanToResultDuration - finalProcessingReserve)
     }
-    private let targetSamplesPerCell = 2
-    private let maxSamplesPerCell = 5
     private var scanStartTimestamp: TimeInterval = 0
     private var scanDeadlineToken: TimeInterval?
     private var normalScanElapsed: TimeInterval = 0
@@ -97,17 +101,6 @@ class LiDARScanner: NSObject, ARSessionDelegate {
     /// 그리드 패닝 임계 거리 (카메라가 그리드 중심에서 이 거리 이상 이동 시 패닝)
     /// 8m 그리드(half-range 4m)의 ~37% 수준으로 설정해 가장자리 데이터 손실 방지
     private let gridPanThreshold: Double = 1.5
-
-    // ── 커버리지 증분 추적 (O(1) 업데이트) ──────────────────────────────
-    private var filledCellCount = 0
-    private var gridMinX = 0
-    private var gridMaxX = 0
-    private var gridMinZ = 0
-    private var gridMaxZ = 0
-    private var gridBBoxInitialized = false
-    /// 채워진 셀 추적 (빠른 스파스 반복용)
-    private var filledCells = Set<Int>()
-    private var totalCellSamples = 0
 
     // ── 자동 종료 추적 ────────────────────────────────────────────────────
     private var autoQualityFrames = 0
@@ -257,15 +250,20 @@ class LiDARScanner: NSObject, ARSessionDelegate {
     // MARK: - Scan Control
 
     func startScan() {
-        resetAccumulators()
-        isScanning = true
-        frameCount = 0
-        scanStartTimestamp = Date().timeIntervalSince1970
-        scanDeadlineToken = scanStartTimestamp
-        scheduleScanStartHardStop(startedAt: scanStartTimestamp)
-        // 바로미터 기준 재설정
-        barometerBaseAltitude = nil
-        barometerRelativeAlt = 0
+        let startedAt = Date().timeIntervalSince1970
+        // 누적 버퍼는 ARSessionDelegate와 같은 processingQueue에서만 변경 (데이터 레이스 방지)
+        processingQueue.async { [weak self] in
+            guard let self else { return }
+            self.resetAccumulators()
+            self.isScanning = true
+            self.frameCount = 0
+            self.scanStartTimestamp = startedAt
+            self.scanDeadlineToken = startedAt
+            // 바로미터 기준 재설정
+            self.barometerBaseAltitude = nil
+            self.barometerRelativeAlt = 0
+        }
+        scheduleScanStartHardStop(startedAt: startedAt)
     }
 
     func stopScan() {
@@ -283,12 +281,7 @@ class LiDARScanner: NSObject, ARSessionDelegate {
     }
 
     private func resetAccumulators() {
-        let w = targetGridWidth, h = targetGridHeight
-        let totalCells = w * h
-        accumulatedHeights       = Array(repeating: 0.0, count: totalCells)
-        accumulatedHeightSquares = Array(repeating: 0.0, count: totalCells)
-        accumulatedCounts        = Array(repeating: 0,   count: totalCells)
-        accumulatedConfidence    = Array(repeating: 0.0, count: totalCells)
+        grid.reset()
         meshVertices.removeAll()
         recentPoses.removeAll()
         recentLightEstimates.removeAll()
@@ -308,14 +301,6 @@ class LiDARScanner: NSObject, ARSessionDelegate {
         gridOriginSet          = false
         lastPanCameraX         = 0
         lastPanCameraZ         = 0
-        filledCellCount        = 0
-        totalCellSamples       = 0
-        filledCells.removeAll()
-        gridMinX               = 0
-        gridMaxX               = 0
-        gridMinZ               = 0
-        gridMaxZ               = 0
-        gridBBoxInitialized    = false
         groundDetected         = false
         detectedGroundY        = 0
         estimatedCameraHeight  = 1.6
@@ -357,10 +342,6 @@ class LiDARScanner: NSObject, ARSessionDelegate {
         currentTiltPitch = pitchDeg
         currentTiltRoll  = rollDeg
 
-        cumulativeTiltPitch += pitchDeg
-        cumulativeTiltRoll  += rollDeg
-        tiltSampleCount     += 1
-
         guard pointingDownScore > 0.15 else {
             updateQuality(frame: frame)
             updateNormalScanTimer(
@@ -371,6 +352,11 @@ class LiDARScanner: NSObject, ARSessionDelegate {
             checkAutoStop()
             return
         }
+
+        // 기울기 평균은 데이터 수집에 실제 사용된(기울기 정상) 프레임만 반영
+        cumulativeTiltPitch += pitchDeg
+        cumulativeTiltRoll  += rollDeg
+        tiltSampleCount     += 1
 
         // 카메라 높이 갱신 (지면 감지 + 바로미터 융합)
         let camPosY = frame.camera.transform.columns.3.y
@@ -385,7 +371,7 @@ class LiDARScanner: NSObject, ARSessionDelegate {
         let camPosZ = Double(frame.camera.transform.columns.3.z)
 
         if !gridOriginSet {
-            // 첫 유효 프레임: 카메라 전방 10m 지점을 그리드 중심으로 설정
+            // 첫 유효 프레임: 카메라 전방 4m(그리드 반경) 지점을 그리드 중심으로 설정
             let camFwd = frame.camera.transform.columns.2
             let fwdX = -Double(camFwd.x)
             let fwdZ = -Double(camFwd.z)
@@ -418,7 +404,7 @@ class LiDARScanner: NSObject, ARSessionDelegate {
         // 진행률 업데이트: 정상 품질 스캔 누적 시간·프레임·커버리지를 함께 반영
         let timeProgress = min(1.0, elapsedSinceScanStart() / maxDataCollectionDuration)
         let frameProgress = min(1.0, Double(normalScanFrameCount) / Double(minFramesForReliableScan))
-        let coverageProgress = min(1.0, Double(filledCellCount) / Double(targetCoverageCellCount()))
+        let coverageProgress = min(1.0, Double(grid.filledCellCount) / Double(targetCoverageCellCount()))
         let progress = min(1.0, max(timeProgress, min(frameProgress, coverageProgress)))
         onScanProgress?(progress)
 
@@ -461,86 +447,30 @@ class LiDARScanner: NSObject, ARSessionDelegate {
 
     // MARK: - Grid Origin Panning (스캔 중 카메라 이동 추적)
 
-    /// 카메라가 그리드 중심에서 임계 거리 이상 이동하면 그리드를 시프트
+    /// 카메라가 그리드 설정 시점(또는 마지막 패닝 시점)에서 임계 거리 이상
+    /// 이동하면 그리드를 같은 양만큼 시프트해 전방 배치를 유지한다.
+    /// 주의: 그리드 원점은 카메라 전방 4m에 있으므로 원점과의 절대 거리가 아니라
+    /// 카메라 이동량(delta) 기준으로 판단해야 한다.
     private func updateGridOriginIfNeeded(cameraX: Double, cameraZ: Double) {
-        let dx = cameraX - gridOriginX
-        let dz = cameraZ - gridOriginZ
+        let dx = cameraX - lastPanCameraX
+        let dz = cameraZ - lastPanCameraZ
 
-        // 카메라가 그리드 중심에서 임계 거리 이상 이동했는지 확인
         guard abs(dx) > gridPanThreshold || abs(dz) > gridPanThreshold else { return }
 
         // 시프트할 셀 수 계산
-        let shiftCellsX = Int(dx / targetCellSize)
-        let shiftCellsZ = Int(dz / targetCellSize)
+        let shiftCellsX = Int((dx / targetCellSize).rounded())
+        let shiftCellsZ = Int((dz / targetCellSize).rounded())
 
         guard shiftCellsX != 0 || shiftCellsZ != 0 else { return }
 
         // 그리드 데이터 시프트
-        shiftGrid(dx: shiftCellsX, dz: shiftCellsZ)
+        grid.shift(dxCells: shiftCellsX, dzCells: shiftCellsZ)
 
-        // 원점 업데이트
+        // 원점·기준 카메라 위치 업데이트 (셀 단위로 양자화된 이동량만 반영)
         gridOriginX += Double(shiftCellsX) * targetCellSize
         gridOriginZ += Double(shiftCellsZ) * targetCellSize
-    }
-
-    /// 그리드 데이터를 (dx, dz) 셀만큼 시프트 (기존 데이터 유지, 새 영역은 0으로 초기화)
-    private func shiftGrid(dx: Int, dz: Int) {
-        let w = targetGridWidth, h = targetGridHeight
-
-        var newHeights       = Array(repeating: 0.0, count: w * h)
-        var newHeightSquares = Array(repeating: 0.0, count: w * h)
-        var newCounts        = Array(repeating: 0,   count: w * h)
-        var newConfidence    = Array(repeating: 0.0, count: w * h)
-        var newFilledCells = Set<Int>()
-        var newTotalSamples = 0
-
-        for z in 0..<h {
-            let srcZ = z + dz
-            guard srcZ >= 0, srcZ < h else { continue }
-            for x in 0..<w {
-                let srcX = x + dx
-                guard srcX >= 0, srcX < w else { continue }
-                let srcIdx = srcZ * w + srcX
-                let dstIdx = z * w + x
-                newHeights[dstIdx]       = accumulatedHeights[srcIdx]
-                newHeightSquares[dstIdx] = accumulatedHeightSquares[srcIdx]
-                newCounts[dstIdx]        = accumulatedCounts[srcIdx]
-                newConfidence[dstIdx]    = accumulatedConfidence[srcIdx]
-                if newCounts[dstIdx] > 0 {
-                    newFilledCells.insert(dstIdx)
-                    newTotalSamples += newCounts[dstIdx]
-                }
-            }
-        }
-
-        accumulatedHeights       = newHeights
-        accumulatedHeightSquares = newHeightSquares
-        accumulatedCounts        = newCounts
-        accumulatedConfidence    = newConfidence
-        filledCells              = newFilledCells
-        filledCellCount          = filledCells.count
-        totalCellSamples         = newTotalSamples
-
-        // 바운딩 박스 재계산
-        recalculateBBox()
-    }
-
-    private func recalculateBBox() {
-        gridBBoxInitialized = false
-        for idx in filledCells {
-            let z = idx / targetGridWidth
-            let x = idx % targetGridWidth
-            if !gridBBoxInitialized {
-                gridMinX = x; gridMaxX = x
-                gridMinZ = z; gridMaxZ = z
-                gridBBoxInitialized = true
-            } else {
-                if x < gridMinX { gridMinX = x }
-                if x > gridMaxX { gridMaxX = x }
-                if z < gridMinZ { gridMinZ = z }
-                if z > gridMaxZ { gridMaxZ = z }
-            }
-        }
+        lastPanCameraX += Double(shiftCellsX) * targetCellSize
+        lastPanCameraZ += Double(shiftCellsZ) * targetCellSize
     }
 
     // MARK: - Depth Processing
@@ -582,11 +512,11 @@ class LiDARScanner: NSObject, ARSessionDelegate {
 
         let step = adaptiveDepthStep()
         var localPoints = 0
-        let roiMinU = (1.0 - scanRectWidthRatio) * 0.5
-        let roiMaxU = 1.0 - roiMinU
-        let roiCenterV = 0.5 - (18.0 / 844.0) // 오버레이의 상단 오프셋(-18pt)와 동일한 중심 보정
-        let roiMinV = roiCenterV - (scanRectHeightRatio * 0.5)
-        let roiMaxV = roiCenterV + (scanRectHeightRatio * 0.5)
+        // 화면 가이드 사각형을 깊이 맵 정규 좌표로 변환
+        // (깊이 맵은 landscape 방향이므로 화면 비율을 직접 쓰면 90° 어긋난다)
+        let roi = depthROI(frame: frame)
+        let roiMinU = roi.minU, roiMaxU = roi.maxU
+        let roiMinV = roi.minV, roiMaxV = roi.maxV
 
         // 카메라 높이에 따른 유효 최대 거리 동적 계산 (바로미터 융합 높이 사용)
         let effectiveHeight = max(estimatedCameraHeight, fusedCameraHeight)
@@ -620,10 +550,15 @@ class LiDARScanner: NSObject, ARSessionDelegate {
                 let localPt  = SIMD4<Float>(xc, yc, -z, 1.0)
                 let worldPt  = cameraTransform * localPt
 
+                // 수용 정책은 센서 자체 신뢰도(high=2)로 판단한다.
+                // 복합 가중치는 권장 각도 30°에서도 기울기 항(~0.5) 때문에 0.75 미만이
+                // 되어, 가중치 기준으로는 셀당 2개 이후 모든 깊이 샘플이 거부되고
+                // 그리드가 비어 평면으로 잘못 인식될 수 있다.
                 if mapToGrid(worldX: Double(worldPt.x),
                              worldY: Double(worldPt.y),
                              worldZ: Double(worldPt.z),
-                             confidence: confWeight) {
+                             confidence: confWeight,
+                             isHighConfidence: confidence == 2) {
                     localPoints += 1
                 }
             }
@@ -636,74 +571,138 @@ class LiDARScanner: NSObject, ARSessionDelegate {
         return 1
     }
 
+    /// 화면 가이드 사각형(ScanOverlayView와 동일 형상)을 깊이 맵 정규 좌표 ROI로 변환.
+    /// `displayTransform` 역변환으로 화면 회전(portrait↔landscape)과
+    /// aspect-fill 크롭을 정확히 반영한다.
+    private func depthROI(frame: ARFrame)
+        -> (minU: Double, maxU: Double, minV: Double, maxV: Double)
+    {
+        // 뷰포트 미설정 시 보수적 폴백: 깊이 맵 중앙 영역 전체 사용
+        guard viewportSize.width > 1, viewportSize.height > 1 else {
+            return (0.05, 0.95, 0.05, 0.95)
+        }
+
+        // 가이드 사각형 (정규화된 뷰 좌표, ScanOverlayView.draw와 동일 형상)
+        let centerY = 0.5 + scanRectCenterYOffset / Double(viewportSize.height)
+        let viewRect = CGRect(
+            x: (1.0 - scanRectWidthRatio) / 2.0,
+            y: centerY - scanRectHeightRatio / 2.0,
+            width: scanRectWidthRatio,
+            height: scanRectHeightRatio
+        )
+
+        // 정규화된 뷰 좌표 → 정규화된 이미지(깊이 맵) 좌표
+        let toImage = frame.displayTransform(
+            for: viewportOrientation,
+            viewportSize: viewportSize
+        ).inverted()
+        let imageRect = viewRect.applying(toImage)
+
+        let minU = max(0.0, Double(imageRect.minX))
+        let maxU = min(1.0, Double(imageRect.maxX))
+        let minV = max(0.0, Double(imageRect.minY))
+        let maxV = min(1.0, Double(imageRect.maxY))
+
+        // 변환 결과가 비정상(너무 좁거나 뒤집힘)이면 중앙 영역 폴백.
+        // ROI가 0이 되면 그리드가 비어 지형이 평면으로 잘못 인식된다.
+        guard maxU - minU > 0.10, maxV - minV > 0.10 else {
+            return (0.05, 0.95, 0.05, 0.95)
+        }
+        return (minU, maxU, minV, maxV)
+    }
+
     // MARK: - Mesh Processing
 
     private func extractMeshVertices(_ meshAnchor: ARMeshAnchor) {
-        let geo    = meshAnchor.geometry
-        let verts  = geo.vertices
-        let stride = verts.stride
-        let buf    = verts.buffer.contents()
-        let tfm    = meshAnchor.transform
+        let geo     = meshAnchor.geometry
+        let verts   = geo.vertices
+        let vBuf    = verts.buffer.contents()
+        let vStride = verts.stride
+        let tfm     = meshAnchor.transform
+        // 지면 ±0.5m 밴드 밖 정점(벽·다리·사물)은 높이 평균을 왜곡하므로 제외
+        let groundBand: Float = 0.5
 
-        for i in 0 ..< verts.count {
-            let ptr    = buf.advanced(by: i * stride)
-            let v      = ptr.assumingMemoryBound(to: SIMD3<Float>.self).pointee
-            let world  = tfm * SIMD4<Float>(v, 1.0)
-            mapToGrid(worldX: Double(world.x),
-                      worldY: Double(world.y),
-                      worldZ: Double(world.z),
-                      confidence: 0.8)
+        // face classification이 있으면 .floor로 분류된 면의 정점만 사용 (가장 정확)
+        if let classification = geo.classification {
+            let faces         = geo.faces
+            let fBuf          = faces.buffer.contents()
+            let cBuf          = classification.buffer.contents()
+            let cStride       = classification.stride
+            let cOffset       = classification.offset
+            let idxPerFace    = faces.indexCountPerPrimitive
+            let bytesPerIndex = faces.bytesPerIndex
+            // 정점은 여러 면에 공유되므로 중복 기여를 막기 위해 인덱스를 모은다
+            var floorVertexIndices = Set<Int>()
+
+            for faceIdx in 0 ..< faces.count {
+                let clsValue = cBuf
+                    .advanced(by: faceIdx * cStride + cOffset)
+                    .assumingMemoryBound(to: UInt8.self).pointee
+                let cls = ARMeshClassification(rawValue: Int(clsValue)) ?? .none
+                // .floor 면은 항상 수용. 야외 잔디·그린은 .none으로 분류되는 경우가
+                // 많으므로, 지면 평면이 감지된 경우에 한해 .none 면도 수용한다
+                // (contributeMeshVertex의 지면 밴드 필터가 벽·사물을 걸러낸다).
+                let acceptable = cls == .floor || (cls == .none && groundDetected)
+                guard acceptable else { continue }
+
+                for corner in 0 ..< idxPerFace {
+                    let byteOffset = (faceIdx * idxPerFace + corner) * bytesPerIndex
+                    let vertIdx: Int
+                    if bytesPerIndex == 2 {
+                        vertIdx = Int(fBuf.advanced(by: byteOffset)
+                            .assumingMemoryBound(to: UInt16.self).pointee)
+                    } else {
+                        vertIdx = Int(fBuf.advanced(by: byteOffset)
+                            .assumingMemoryBound(to: UInt32.self).pointee)
+                    }
+                    floorVertexIndices.insert(vertIdx)
+                }
+            }
+
+            for vertIdx in floorVertexIndices {
+                contributeMeshVertex(index: vertIdx, buffer: vBuf, vertexStride: vStride,
+                                     transform: tfm, groundBand: groundBand)
+            }
+            return
         }
+
+        // classification 미지원 폴백: 지면 평면 감지 후 지면 밴드 내 정점만 사용
+        guard groundDetected else { return }
+        for i in 0 ..< verts.count {
+            contributeMeshVertex(index: i, buffer: vBuf, vertexStride: vStride,
+                                 transform: tfm, groundBand: groundBand)
+        }
+    }
+
+    private func contributeMeshVertex(index: Int, buffer: UnsafeMutableRawPointer,
+                                      vertexStride: Int, transform: simd_float4x4,
+                                      groundBand: Float) {
+        let v = buffer.advanced(by: index * vertexStride)
+            .assumingMemoryBound(to: SIMD3<Float>.self).pointee
+        let world = transform * SIMD4<Float>(v, 1.0)
+        // 지면이 감지된 경우 지면 밴드 밖 정점 제외 (classification 보조 필터)
+        if groundDetected && abs(world.y - detectedGroundY) >= groundBand { return }
+        // 깊이 데이터보다 낮은 신뢰도로 기여 (저신뢰 상한 정책에 따라 자동 제한)
+        mapToGrid(worldX: Double(world.x),
+                  worldY: Double(world.y),
+                  worldZ: Double(world.z),
+                  confidence: 0.3)
     }
 
     // MARK: - Grid Mapping
 
+    /// 월드 좌표 샘플을 그리드 상대 좌표로 변환해 누적기로 위임.
+    /// 샘플 수용 정책(고신뢰 무제한·저신뢰 상한)은 TerrainGridAccumulator 참조.
     @discardableResult
-    private func mapToGrid(worldX: Double, worldY: Double, worldZ: Double, confidence: Double) -> Bool {
-        let gridRangeX = Double(targetGridWidth)  * targetCellSize / 2.0
-        let gridRangeZ = Double(targetGridHeight) * targetCellSize / 2.0
-
-        let relX = worldX - gridOriginX
-        let relZ = worldZ - gridOriginZ
-
-        let gx = Int((relX + gridRangeX) / targetCellSize)
-        let gz = Int((relZ + gridRangeZ) / targetCellSize)
-
-        guard gx >= 0, gx < targetGridWidth,
-              gz >= 0, gz < targetGridHeight else { return false }
-
-        let cellIdx = gz * targetGridWidth + gx
-        let existingCount = accumulatedCounts[cellIdx]
-
-        if existingCount >= maxSamplesPerCell {
-            return false
-        }
-        if existingCount >= targetSamplesPerCell && confidence < 0.75 {
-            return false
-        }
-
-        // 새로 채워지는 셀이면 커버리지 갱신
-        if existingCount == 0 {
-            filledCellCount += 1
-            filledCells.insert(cellIdx)
-            if !gridBBoxInitialized {
-                gridMinX = gx; gridMaxX = gx
-                gridMinZ = gz; gridMaxZ = gz
-                gridBBoxInitialized = true
-            } else {
-                if gx < gridMinX { gridMinX = gx }
-                if gx > gridMaxX { gridMaxX = gx }
-                if gz < gridMinZ { gridMinZ = gz }
-                if gz > gridMaxZ { gridMaxZ = gz }
-            }
-        }
-
-        accumulatedHeights[cellIdx]       += worldY * confidence
-        accumulatedHeightSquares[cellIdx] += worldY * worldY * confidence
-        accumulatedConfidence[cellIdx]    += confidence
-        accumulatedCounts[cellIdx]        += 1
-        totalCellSamples += 1
-        return true
+    private func mapToGrid(worldX: Double, worldY: Double, worldZ: Double,
+                           confidence: Double, isHighConfidence: Bool = false) -> Bool {
+        grid.accumulate(
+            relX: worldX - gridOriginX,
+            relZ: worldZ - gridOriginZ,
+            height: worldY,
+            confidence: confidence,
+            isHighConfidence: isHighConfidence
+        )
     }
 
     // MARK: - Streaming Mesh (실시간, 0.5초 간격)
@@ -723,29 +722,16 @@ class LiDARScanner: NSObject, ARSessionDelegate {
 
     /// 현재 축적 데이터로부터 간이 높이 맵 생성 (필터링 없이 빠른 스냅샷)
     private func generateStreamingSnapshot() -> HeightMapData {
-        var heightFlat = [Double](repeating: 0, count: targetGridWidth * targetGridHeight)
-        var confFlat   = [Double](repeating: 0, count: targetGridWidth * targetGridHeight)
-        var uncertaintyFlat = [Double](repeating: 0, count: targetGridWidth * targetGridHeight)
         let baseline = heightBaseline()
-
-        for idx in filledCells {
-            let wsum = accumulatedConfidence[idx]
-            if wsum > 0 {
-                let avg = accumulatedHeights[idx] / wsum
-                heightFlat[idx] = avg - baseline
-                confFlat[idx]   = min(1.0, wsum / 5.0)
-                let variance = max(0, accumulatedHeightSquares[idx] / wsum - avg * avg)
-                uncertaintyFlat[idx] = sqrt(variance)
-            }
-        }
+        let maps = grid.weightedHeightMap(baseline: baseline)
 
         return HeightMapData(
             gridWidth:  targetGridWidth,
             gridHeight: targetGridHeight,
             cellSize:   targetCellSize,
-            heightMap:  heightFlat,
-            confidenceMap: confFlat,
-            uncertaintyMap: uncertaintyFlat,
+            heightMap:  maps.heights,
+            confidenceMap: maps.confidence,
+            uncertaintyMap: maps.uncertainty,
             tiltPitch:  tiltSampleCount > 0 ? cumulativeTiltPitch / Double(tiltSampleCount) : 0,
             tiltRoll:   tiltSampleCount > 0 ? cumulativeTiltRoll / Double(tiltSampleCount) : 0,
             totalPointCount: totalContributedPoints,
@@ -758,14 +744,7 @@ class LiDARScanner: NSObject, ARSessionDelegate {
 
     private func heightBaseline() -> Double {
         if groundDetected { return Double(detectedGroundY) }
-
-        var minHeight = Double.greatestFiniteMagnitude
-        for idx in filledCells {
-            let wsum = accumulatedConfidence[idx]
-            guard wsum > 0 else { continue }
-            minHeight = min(minHeight, accumulatedHeights[idx] / wsum)
-        }
-        return minHeight.isFinite ? minHeight : 0
+        return grid.minAverageHeight() ?? 0
     }
 
     // MARK: - Depth Image (실시간, 약 2fps)
@@ -776,8 +755,10 @@ class LiDARScanner: NSObject, ARSessionDelegate {
         lastDepthImageTime = now
 
         guard let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth else { return }
-        let depthBuf = depthData.depthMap
-        let confBuf  = depthData.confidenceMap
+        // ARFrame의 픽셀 버퍼를 비동기 클로저에 보유하면 ARKit 버퍼 풀이 고갈되어
+        // 프레임 드롭이 발생할 수 있으므로, 복사본을 만들어 전달한다 (256×192 ≈ 250KB, 2fps)
+        guard let depthBuf = LiDARScanner.copyPixelBuffer(depthData.depthMap) else { return }
+        let confBuf = depthData.confidenceMap.flatMap { LiDARScanner.copyPixelBuffer($0) }
         let pitch    = pitchDeg
         let roll     = rollDeg
 
@@ -798,6 +779,43 @@ class LiDARScanner: NSObject, ARSessionDelegate {
         }
     }
 
+    /// CVPixelBuffer 깊은 복사 (단일 평면 버퍼 전용: DepthFloat32 / OneComponent8)
+    private static func copyPixelBuffer(_ src: CVPixelBuffer) -> CVPixelBuffer? {
+        let width  = CVPixelBufferGetWidth(src)
+        let height = CVPixelBufferGetHeight(src)
+        let format = CVPixelBufferGetPixelFormatType(src)
+
+        var dstOpt: CVPixelBuffer?
+        let status = CVPixelBufferCreate(kCFAllocatorDefault, width, height, format,
+                                         nil, &dstOpt)
+        guard status == kCVReturnSuccess, let dst = dstOpt else { return nil }
+
+        CVPixelBufferLockBaseAddress(src, .readOnly)
+        CVPixelBufferLockBaseAddress(dst, [])
+        defer {
+            CVPixelBufferUnlockBaseAddress(src, .readOnly)
+            CVPixelBufferUnlockBaseAddress(dst, [])
+        }
+
+        guard let srcBase = CVPixelBufferGetBaseAddress(src),
+              let dstBase = CVPixelBufferGetBaseAddress(dst) else { return nil }
+
+        let srcStride = CVPixelBufferGetBytesPerRow(src)
+        let dstStride = CVPixelBufferGetBytesPerRow(dst)
+
+        if srcStride == dstStride {
+            memcpy(dstBase, srcBase, srcStride * height)
+        } else {
+            let rowBytes = min(srcStride, dstStride)
+            for row in 0..<height {
+                memcpy(dstBase.advanced(by: row * dstStride),
+                       srcBase.advanced(by: row * srcStride),
+                       rowBytes)
+            }
+        }
+        return dst
+    }
+
     // MARK: - Quality Assessment
 
     private func updateQuality(frame: ARFrame) {
@@ -807,9 +825,9 @@ class LiDARScanner: NSObject, ARSessionDelegate {
             quality.averageConfidence = calculateAverageConfidence(depthData.confidenceMap)
         }
 
-        if filledCellCount > 0 {
-            quality.coveragePercent = min(1.0, Double(filledCellCount) / Double(targetCoverageCellCount()))
-            quality.averageSamplesPerCell = Double(totalCellSamples) / Double(filledCellCount)
+        if grid.filledCellCount > 0 {
+            quality.coveragePercent = min(1.0, Double(grid.filledCellCount) / Double(targetCoverageCellCount()))
+            quality.averageSamplesPerCell = grid.averageSamplesPerCell
         } else {
             quality.coveragePercent = 0
             quality.averageSamplesPerCell = 0
@@ -964,21 +982,8 @@ class LiDARScanner: NSObject, ARSessionDelegate {
             : Date().timeIntervalSince1970 + finalProcessingReserve
 
         // 가중 평균으로 높이 계산
-        var heightFlat = [Double](repeating: 0, count: targetGridWidth * targetGridHeight)
-        var confFlat   = [Double](repeating: 0, count: targetGridWidth * targetGridHeight)
-        var uncertaintyFlat = [Double](repeating: 0, count: targetGridWidth * targetGridHeight)
         let baseline = heightBaseline()
-
-        for idx in 0 ..< (targetGridWidth * targetGridHeight) {
-            let wsum = accumulatedConfidence[idx]
-            if wsum > 0 {
-                let avg = accumulatedHeights[idx] / wsum
-                heightFlat[idx] = avg - baseline
-                confFlat[idx]   = min(1.0, wsum / Double(targetSamplesPerCell))
-                let variance = max(0, accumulatedHeightSquares[idx] / wsum - avg * avg)
-                uncertaintyFlat[idx] = sqrt(variance)
-            }
-        }
+        let maps = grid.weightedHeightMap(baseline: baseline)
 
         let avgPitch = tiltSampleCount > 0 ? cumulativeTiltPitch / Double(tiltSampleCount) : 0
         let avgRoll  = tiltSampleCount > 0 ? cumulativeTiltRoll  / Double(tiltSampleCount) : 0
@@ -987,9 +992,9 @@ class LiDARScanner: NSObject, ARSessionDelegate {
             gridWidth:  targetGridWidth,
             gridHeight: targetGridHeight,
             cellSize:   targetCellSize,
-            heightMap:  heightFlat,
-            confidenceMap: confFlat,
-            uncertaintyMap: uncertaintyFlat,
+            heightMap:  maps.heights,
+            confidenceMap: maps.confidence,
+            uncertaintyMap: maps.uncertainty,
             tiltPitch:  avgPitch,
             tiltRoll:   avgRoll,
             totalPointCount: totalContributedPoints,

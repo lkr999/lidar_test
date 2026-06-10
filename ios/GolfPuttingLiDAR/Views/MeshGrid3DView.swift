@@ -19,10 +19,35 @@ class MeshGrid3DView: UIView {
     private var contourNode: SCNNode?
     private var trajectoryNode: SCNNode?
     private var arrowNodes: [SCNNode] = []
+    private var markerNodes: [SCNNode] = []
     private var terrain: HeightMapData?
 
     // 높이 스케일 팩터 (미세한 높이 차이를 시각적으로 강조)
     private let heightScale: Float = 50.0
+
+    /// 경사 기반 물결 애니메이션 프래그먼트 셰이더.
+    /// slopeMap 텍스처: RG = 내리막 방향(-1~1을 0~1로 인코딩), B = 정규화된 경사 크기.
+    /// 내리막 방향으로 흐르는 물결 밴드를 그리며, 경사가 급할수록 빠르게 흐른다.
+    private static let rippleFragmentModifier = """
+    #pragma arguments
+    texture2d<float, access::sample> slopeMap;
+    #pragma body
+    constexpr sampler slopeSampler(filter::linear, address::clamp_to_edge);
+    float4 slopeSample = slopeMap.sample(slopeSampler, _surface.diffuseTexcoord);
+    float2 flowDir = slopeSample.xy * 2.0 - 1.0;
+    float slopeMag = slopeSample.z;
+    if (slopeMag > 0.015 && length(flowDir) > 0.05) {
+        float2 dir = normalize(flowDir);
+        // 경사 크기에 비례한 물결 속도 (완경사 ~0.4, 최대 경사 ~6.4 cycles/sec)
+        float speed = 0.4 + slopeMag * 6.0;
+        float bands = 24.0;
+        float phase = dot(_surface.diffuseTexcoord, dir) * bands - u_time * speed;
+        float wave = 0.5 + 0.5 * sin(phase * 6.2831853);
+        float band = smoothstep(0.60, 0.92, wave);
+        float strength = clamp(0.20 + slopeMag * 0.55, 0.0, 0.75);
+        _output.color.rgb = mix(_output.color.rgb, float3(0.45, 0.85, 1.0), band * strength);
+    }
+    """
 
     // MARK: - Init
 
@@ -48,6 +73,9 @@ class MeshGrid3DView: UIView {
         scnView.allowsCameraControl = true   // 핀치 줌, 팬, 회전 자동 지원
         scnView.autoenablesDefaultLighting = true
         scnView.antialiasingMode = .multisampling4X
+        // 물결 셰이더가 u_time 기반으로 흐르므로 연속 렌더링 필요
+        // (기본값은 변화가 없으면 렌더링을 멈춰 애니메이션이 정지된다)
+        scnView.rendersContinuously = true
         addSubview(scnView)
 
         setupCamera()
@@ -99,6 +127,8 @@ class MeshGrid3DView: UIView {
         trajectoryNode?.removeFromParentNode()
         arrowNodes.forEach { $0.removeFromParentNode() }
         arrowNodes.removeAll()
+        markerNodes.forEach { $0.removeFromParentNode() }
+        markerNodes.removeAll()
 
         // 메쉬 생성
         let step = adaptiveStep(for: terrain)
@@ -121,6 +151,8 @@ class MeshGrid3DView: UIView {
     func showTrajectory(_ trajectory: [Vector2], terrain: HeightMapData,
                         ballPos: Vector2, holePos: Vector2) {
         trajectoryNode?.removeFromParentNode()
+        markerNodes.forEach { $0.removeFromParentNode() }
+        markerNodes.removeAll()
 
         var points: [SCNVector3] = []
         let halfW = Double(terrain.gridWidth) * terrain.cellSize / 2.0
@@ -149,10 +181,12 @@ class MeshGrid3DView: UIView {
         // 볼 마커
         let ballScn = createSphereMarker(at: points.first!, color: .white, radius: 0.08)
         scene.rootNode.addChildNode(ballScn)
+        markerNodes.append(ballScn)
 
         // 홀 마커
         let holeScn = createSphereMarker(at: points.last!, color: .red, radius: 0.12)
         scene.rootNode.addChildNode(holeScn)
+        markerNodes.append(holeScn)
     }
 
     // MARK: - Mesh Generation
@@ -268,6 +302,19 @@ class MeshGrid3DView: UIView {
         material.lightingModel     = .physicallyBased
         material.metalness.contents = 0.1
         material.roughness.contents = 0.8
+
+        // 경사 기반 물결 애니메이션: 내리막 방향으로 물결이 흐르고
+        // 경사가 급할수록 속도가 빨라져 경사를 시각적으로 표현한다
+        if let slopeImage = makeSlopeFlowTexture(terrain: terrain) {
+            let slopeProperty = SCNMaterialProperty(contents: slopeImage)
+            slopeProperty.wrapS = .clamp
+            slopeProperty.wrapT = .clamp
+            slopeProperty.minificationFilter  = .linear
+            slopeProperty.magnificationFilter = .linear
+            material.shaderModifiers = [.fragment: MeshGrid3DView.rippleFragmentModifier]
+            material.setValue(slopeProperty, forKey: "slopeMap")
+        }
+
         geometry.materials = [material]
 
         let node = SCNNode(geometry: geometry)
@@ -277,63 +324,112 @@ class MeshGrid3DView: UIView {
 
     // MARK: - Contour Lines
 
+    /// 등고선 노드 생성 — 마칭 스퀘어 교차점을 라인 지오메트리로 렌더링.
+    /// 교차점마다 구체 노드를 만들던 방식 대신 주요/보조 각각 단일 SCNGeometry로
+    /// 합쳐 노드 수를 대폭 줄이고, 1cm 보조 등고선까지 표시한다.
     private func createContourNode(terrain: HeightMapData, step: Int) -> SCNNode {
         let parentNode = SCNNode()
         parentNode.name = "contours"
 
         let minH = terrain.minHeight
         let maxH = terrain.maxHeight
-        let contourInterval = 0.01 // 1cm
+        let contourInterval = 0.01  // 1cm 간격, 5cm마다 주요 등고선
         let halfW = Double(terrain.gridWidth) * terrain.cellSize / 2.0
         let halfH = Double(terrain.gridHeight) * terrain.cellSize / 2.0
+        let cs = max(2, step)
 
-        let contourStep = max(2, step)
+        var majorVertices: [SCNVector3] = []  // 2개당 선분 1개
+        var minorVertices: [SCNVector3] = []
 
         var level = (minH / contourInterval).rounded(.down) * contourInterval
         while level <= maxH {
             let isMajor = abs(level.remainder(dividingBy: 0.05)) < 0.001
+            var segments: [SCNVector3] = []
+            let sceneY = Float(level) * heightScale + 0.01
 
-            var linePoints: [SCNVector3] = []
+            func scenePoint(_ p: (x: Double, y: Double)) -> SCNVector3 {
+                SCNVector3(
+                    Float(p.x * terrain.cellSize - halfW),
+                    sceneY,
+                    Float(p.y * terrain.cellSize - halfH)
+                )
+            }
 
-            for y in stride(from: 0, to: terrain.gridHeight - contourStep, by: contourStep) {
-                for x in stride(from: 0, to: terrain.gridWidth - contourStep, by: contourStep) {
-                    let h00 = terrain.getHeight(x: x, y: y)
-                    let h10 = terrain.getHeight(x: x + contourStep, y: y)
+            for y in stride(from: 0, to: terrain.gridHeight - cs, by: cs) {
+                for x in stride(from: 0, to: terrain.gridWidth - cs, by: cs) {
+                    let h00 = terrain.getHeight(x: x,      y: y)
+                    let h10 = terrain.getHeight(x: x + cs, y: y)
+                    let h01 = terrain.getHeight(x: x,      y: y + cs)
+                    let h11 = terrain.getHeight(x: x + cs, y: y + cs)
 
+                    // 셀 4변의 등고선 교차점 수집 (마칭 스퀘어)
+                    // 순서: 상변, 하변, 좌변, 우변
+                    var crossings: [(x: Double, y: Double)] = []
                     if (h00 - level) * (h10 - level) < 0 {
                         let t = (level - h00) / (h10 - h00)
-                        let px = (Double(x) + t * Double(contourStep)) * terrain.cellSize - halfW
-                        let pz = Double(y) * terrain.cellSize - halfH
-                        linePoints.append(SCNVector3(
-                            Float(px),
-                            Float(level) * heightScale + 0.01,
-                            Float(pz)
-                        ))
+                        crossings.append((Double(x) + t * Double(cs), Double(y)))
+                    }
+                    if (h01 - level) * (h11 - level) < 0 {
+                        let t = (level - h01) / (h11 - h01)
+                        crossings.append((Double(x) + t * Double(cs), Double(y + cs)))
+                    }
+                    if (h00 - level) * (h01 - level) < 0 {
+                        let t = (level - h00) / (h01 - h00)
+                        crossings.append((Double(x), Double(y) + t * Double(cs)))
+                    }
+                    if (h10 - level) * (h11 - level) < 0 {
+                        let t = (level - h10) / (h11 - h10)
+                        crossings.append((Double(x + cs), Double(y) + t * Double(cs)))
+                    }
+
+                    if crossings.count == 2 {
+                        segments.append(scenePoint(crossings[0]))
+                        segments.append(scenePoint(crossings[1]))
+                    } else if crossings.count == 4 {
+                        // 안장점: (상변-좌변), (하변-우변) 짝으로 연결
+                        segments.append(scenePoint(crossings[0]))
+                        segments.append(scenePoint(crossings[2]))
+                        segments.append(scenePoint(crossings[1]))
+                        segments.append(scenePoint(crossings[3]))
                     }
                 }
             }
 
-            if linePoints.count >= 2 && isMajor {
-                let color: UIColor = isMajor
-                    ? UIColor.white.withAlphaComponent(0.6)
-                    : UIColor.white.withAlphaComponent(0.25)
-                let width: CGFloat = isMajor ? 1.5 : 0.5
-
-                // 점들을 작은 구로 표시 (등고선 근사)
-                for pt in linePoints {
-                    let sphere = SCNSphere(radius: width * 0.003)
-                    sphere.firstMaterial?.diffuse.contents = color
-                    sphere.firstMaterial?.lightingModel = .constant
-                    let node = SCNNode(geometry: sphere)
-                    node.position = pt
-                    parentNode.addChildNode(node)
-                }
+            if isMajor {
+                majorVertices.append(contentsOf: segments)
+            } else {
+                minorVertices.append(contentsOf: segments)
             }
-
             level += contourInterval
         }
 
+        if let node = contourLineNode(vertices: majorVertices,
+                                      color: UIColor.white.withAlphaComponent(0.6)) {
+            parentNode.addChildNode(node)
+        }
+        if let node = contourLineNode(vertices: minorVertices,
+                                      color: UIColor.white.withAlphaComponent(0.22)) {
+            parentNode.addChildNode(node)
+        }
+
         return parentNode
+    }
+
+    /// 정점 쌍 목록(2개당 선분 1개)을 단일 라인 지오메트리 노드로 생성
+    private func contourLineNode(vertices: [SCNVector3], color: UIColor) -> SCNNode? {
+        guard vertices.count >= 2 else { return nil }
+
+        let source  = SCNGeometrySource(vertices: vertices)
+        let indices = Array(0 ..< UInt32(vertices.count))
+        let element = SCNGeometryElement(indices: indices, primitiveType: .line)
+        let geometry = SCNGeometry(sources: [source], elements: [element])
+
+        let material = SCNMaterial()
+        material.diffuse.contents = color
+        material.lightingModel = .constant
+        geometry.materials = [material]
+
+        return SCNNode(geometry: geometry)
     }
 
     // MARK: - Water Flow Arrows
@@ -357,7 +453,8 @@ class MeshGrid3DView: UIView {
                 let slope = TerrainAnalyzer.calculateHighPrecisionSlope(terrain: terrain, x: cx, y: cy)
                 let mag = slope.length
 
-                if mag > 0.003 {
+                // 0.15% 이상 경사부터 화살표 표시 (완만한 그린 경사도 시각화)
+                if mag > 0.0015 {
                     let slopeRatio = min(mag / maxSlope, 1.0)
                     let norm = slope.normalized()
                     let arrowLen = min(mag * 3.0, 0.12)
@@ -380,6 +477,46 @@ class MeshGrid3DView: UIView {
             }
             gy += spacing
         }
+    }
+
+    // MARK: - Slope Flow Texture (물결 셰이더 입력)
+
+    /// 셀별 내리막 방향(RG)·경사 크기(B)를 RGBA8 텍스처로 인코딩.
+    /// 메쉬 텍스처 좌표(gx/w, gy/h)와 픽셀 (x, y)가 1:1로 대응한다.
+    private func makeSlopeFlowTexture(terrain: HeightMapData) -> UIImage? {
+        let w = terrain.gridWidth, h = terrain.gridHeight
+        guard w > 0, h > 0 else { return nil }
+
+        // 이 기준 이상의 경사(12%)는 최대 물결 속도로 클램프
+        let maxSlopeRef = 0.12
+        var pixels = [UInt8](repeating: 0, count: w * h * 4)
+
+        for y in 0..<h {
+            for x in 0..<w {
+                let slope = TerrainAnalyzer.calculateHighPrecisionSlope(
+                    terrain: terrain, x: x, y: y)
+                let mag = slope.length
+                let dir = mag > 1e-6 ? slope.normalized() : .zero
+                let idx = (y * w + x) * 4
+                pixels[idx]     = UInt8(max(0, min(255, Int((dir.x * 0.5 + 0.5) * 255))))
+                pixels[idx + 1] = UInt8(max(0, min(255, Int((dir.y * 0.5 + 0.5) * 255))))
+                pixels[idx + 2] = UInt8(max(0, min(255, Int(min(1.0, mag / maxSlopeRef) * 255))))
+                pixels[idx + 3] = 255
+            }
+        }
+
+        guard let provider = CGDataProvider(data: Data(pixels) as CFData),
+              let cgImage = CGImage(
+                  width: w, height: h,
+                  bitsPerComponent: 8, bitsPerPixel: 32,
+                  bytesPerRow: w * 4,
+                  space: CGColorSpaceCreateDeviceRGB(),
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                  provider: provider, decode: nil,
+                  shouldInterpolate: true, intent: .defaultIntent
+              ) else { return nil }
+
+        return UIImage(cgImage: cgImage)
     }
 
     // MARK: - Helpers

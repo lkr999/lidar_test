@@ -147,7 +147,11 @@ class MainViewController: UIViewController {
         // - scanner.arSession: LiDAR 풀설정으로 실행됨
         // → 같은 세션을 사용해야 카메라 화면 + LiDAR 데이터 동시 처리 가능
         arView.session = scanner.arSession
-        
+
+        // 스캔 ROI(화면 가이드 사각형)를 깊이 맵 좌표로 역변환할 때 필요한 뷰포트 정보
+        scanner.viewportSize = view.bounds.size
+        scanner.viewportOrientation = .portrait
+
         scanner.onQualityUpdate = { [weak self] quality in
             DispatchQueue.main.async {
                 self?.updateQualityUI(quality)
@@ -668,6 +672,7 @@ class MainViewController: UIViewController {
         scanStartTime           = Date()
         lastCoverageForStall    = -1
         lastCoverageChangeTime  = Date()
+        scanner.viewportSize = view.bounds.size   // 레이아웃 변경 대비 최신 값 갱신
         scanner.startScan()
 
         scanButton.setTitle("⏹ 스캔 중지", for: .normal)
