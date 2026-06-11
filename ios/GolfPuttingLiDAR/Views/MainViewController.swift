@@ -14,14 +14,12 @@ class MainViewController: UIViewController {
     // MARK: - UI Components
     private var overlayView: ScanOverlayView!
     private var trajectoryOverlayView: TrajectoryOverlayView!
-    private var meshGrid3DView: MeshGrid3DView!
     private var statusBar: UIView!
     private var qualityLabel: UILabel!
     private var qualityBar: UIProgressView!
     private var scanButton: UIButton!
     private var measureButton: UIButton!
     private var resetButton: UIButton!
-    private var toggle3DButton: UIButton!
     private var saveMapButton: UIButton!
     private var instructionLabel: UILabel!
     
@@ -77,9 +75,6 @@ class MainViewController: UIViewController {
     private var adjustOverlay: PositionAdjustOverlay?
     private var pendingBallScreen: CGPoint?
     private var pendingHoleScreen: CGPoint?
-
-    // 3D 메쉬 뷰 상태
-    private var is3DViewVisible = false
 
     // World Map 저장 키
     private let worldMapKey = "com.lidar.putting.worldmap"
@@ -219,7 +214,7 @@ class MainViewController: UIViewController {
         setupInstructionLabel()
         setupScanOverlay()
         setupTrajectoryOverlay()
-        setup3DMeshView()
+        setupSaveMapButton()
         setupLevelIndicator()
         setupFrictionSlider()
         setupScanProgressBar()
@@ -353,26 +348,8 @@ class MainViewController: UIViewController {
         view.addSubview(trajectoryOverlayView)
     }
 
-    /// SceneKit 3D 메쉬 뷰 (인터랙티브 회전/줌)
-    private func setup3DMeshView() {
-        meshGrid3DView = MeshGrid3DView(frame: view.bounds)
-        meshGrid3DView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        meshGrid3DView.isHidden = true
-        view.addSubview(meshGrid3DView)
-
-        // 3D 토글 버튼
-        toggle3DButton = UIButton(type: .system)
-        toggle3DButton.setTitle("3D", for: .normal)
-        toggle3DButton.titleLabel?.font = UIFont.systemFont(ofSize: 13, weight: .bold)
-        toggle3DButton.setTitleColor(.white, for: .normal)
-        toggle3DButton.backgroundColor = UIColor(red: 0.47, green: 0.33, blue: 0.82, alpha: 1)
-        toggle3DButton.layer.cornerRadius = 20
-        toggle3DButton.translatesAutoresizingMaskIntoConstraints = false
-        toggle3DButton.addTarget(self, action: #selector(toggle3DView), for: .touchUpInside)
-        toggle3DButton.isHidden = true
-        view.addSubview(toggle3DButton)
-
-        // World Map 저장 버튼
+    /// World Map 저장 버튼
+    private func setupSaveMapButton() {
         saveMapButton = UIButton(type: .system)
         saveMapButton.setTitle("💾", for: .normal)
         saveMapButton.titleLabel?.font = UIFont.systemFont(ofSize: 18)
@@ -384,13 +361,8 @@ class MainViewController: UIViewController {
         view.addSubview(saveMapButton)
 
         NSLayoutConstraint.activate([
-            toggle3DButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            toggle3DButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 70),
-            toggle3DButton.widthAnchor.constraint(equalToConstant: 40),
-            toggle3DButton.heightAnchor.constraint(equalToConstant: 40),
-
-            saveMapButton.leadingAnchor.constraint(equalTo: toggle3DButton.trailingAnchor, constant: 8),
-            saveMapButton.topAnchor.constraint(equalTo: toggle3DButton.topAnchor),
+            saveMapButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            saveMapButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 70),
             saveMapButton.widthAnchor.constraint(equalToConstant: 40),
             saveMapButton.heightAnchor.constraint(equalToConstant: 40),
         ])
@@ -588,37 +560,6 @@ class MainViewController: UIViewController {
         }
     }
 
-    @objc private func toggle3DView() {
-        guard let heightMap = currentHeightMap else { return }
-
-        is3DViewVisible.toggle()
-
-        if is3DViewVisible {
-            meshGrid3DView.configure(terrain: heightMap)
-
-            // 궤적이 있으면 3D에도 표시
-            if let ball = ballPosition, let hole = holePosition {
-                let physics = PuttingPhysics(terrain: heightMap, resistancePercent: resistancePercent)
-                let (_, result) = physics.findBestSpeedAndPath(ballPos: ball, holePos: hole)
-                meshGrid3DView.showTrajectory(result.trajectory, terrain: heightMap,
-                                               ballPos: ball, holePos: hole)
-            }
-
-            meshGrid3DView.isHidden = false
-            view.bringSubviewToFront(meshGrid3DView)
-            view.bringSubviewToFront(toggle3DButton)
-            view.bringSubviewToFront(statusBar)
-            for sv in view.subviews where sv is UIStackView { view.bringSubviewToFront(sv) }
-
-            toggle3DButton.setTitle("2D", for: .normal)
-            toggle3DButton.backgroundColor = UIColor(red: 0.09, green: 0.47, blue: 0.95, alpha: 1)
-        } else {
-            meshGrid3DView.isHidden = true
-            toggle3DButton.setTitle("3D", for: .normal)
-            toggle3DButton.backgroundColor = UIColor(red: 0.47, green: 0.33, blue: 0.82, alpha: 1)
-        }
-    }
-
     @objc private func saveWorldMapTapped() {
         instructionLabel.text = "💾 World Map 저장 중..."
         scanner.saveWorldMap { [weak self] data in
@@ -766,10 +707,8 @@ class MainViewController: UIViewController {
 
         arView.debugOptions = []
 
-        // 3D 토글 + World Map 저장 버튼 표시
-        toggle3DButton.isHidden = false
+        // World Map 저장 버튼 표시
         saveMapButton.isHidden = false
-        view.bringSubviewToFront(toggle3DButton)
         view.bringSubviewToFront(saveMapButton)
 
         // 깊이 합성 이미지를 배경으로 표시 (측정 참조 기반 이미지)
@@ -816,7 +755,11 @@ class MainViewController: UIViewController {
     private func runDetectionSample() {
         guard currentState == .detecting else { detectionTimer?.invalidate(); return }
         detectionSampleCount += 1
-        let snap = arView.snapshot()
+        // 반드시 스캔 완료 시점의 정지 이미지에서 감지해야 한다.
+        // 라이브 카메라 스냅샷을 쓰면 사용자가 폰을 움직였을 때 감지 좌표가
+        // 화면에 깔린 정지 이미지·capturedARCamera 역투영과 어긋나
+        // 확정한 볼/홀 위치가 분석 화면에서 다른 곳에 나타난다.
+        let snap = capturedImage ?? arView.snapshot()
         VisionDetector.detectCircles(in: snap, viewSize: arView.bounds.size) { [weak self] circles in
             guard let self, self.currentState == .detecting else { return }
             // 새 원 누적 (중복 제거: 기존과 거리가 먼 것만 추가)
@@ -1036,17 +979,17 @@ class MainViewController: UIViewController {
         let ori: UIInterfaceOrientation = (UIApplication.shared.connectedScenes.first as? UIWindowScene)
             .map { $0.interfaceOrientation } ?? .portrait
 
-        let rx = Double(hm.gridWidth)  * hm.cellSize / 2.0
-        let rz = Double(hm.gridHeight) * hm.cellSize / 2.0
-
-        // 그리드 인덱스 → 월드 좌표 (TrajectoryOverlayView.gridToWorld3D와 동일 공식)
+        // 그리드 인덱스 → 월드 좌표 — 그리드 yaw(카메라 방향 정렬)를 반영하는
+        // HeightMapData 공용 헬퍼 사용 (TrajectoryOverlayView.gridToWorld3D와 동일 변환)
         func gridIndexToWorld(_ gx: Int, _ gy: Int) -> SIMD3<Float> {
             let gxC = max(0, min(gx, hm.gridWidth  - 1))
             let gyC = max(0, min(gy, hm.gridHeight - 1))
+            let world = hm.gridLocalToWorldXZ(
+                Vector2(x: Double(gx) * hm.cellSize, y: Double(gy) * hm.cellSize))
             return SIMD3<Float>(
-                Float(Double(gx) * hm.cellSize - rx + hm.originX),
+                Float(world.x),
                 Float(hm.getHeight(x: gxC, y: gyC) + hm.groundY),
-                Float(Double(gy) * hm.cellSize - rz + hm.originZ)
+                Float(world.z)
             )
         }
 
@@ -1185,6 +1128,11 @@ class MainViewController: UIViewController {
         let puttDistM = (holePosition! - ballPosition!).length
 
         if let heightMap = currentHeightMap {
+            // 퍼팅 세기: 평지(높이차 0)=100 기준, 중력·표면 저항 영향을 비례 수치로 환산
+            let physics = PuttingPhysics(terrain: heightMap, resistancePercent: resistancePercent)
+            let powerPercent = physics.relativePowerPercent(
+                speed: speed, ballPos: ballPosition!, holePos: holePosition!)
+
             trajectoryOverlayView.configure(
                 terrain: heightMap,
                 trajectory: result.trajectory,
@@ -1196,7 +1144,8 @@ class MainViewController: UIViewController {
                 puttDistance: puttDistM,
                 breakAmount: result.breakAmount,
                 puttSpeed: speed,
-                resistancePercent: resistancePercent
+                resistancePercent: resistancePercent,
+                powerPercent: powerPercent
             )
         }
 
@@ -1236,10 +1185,7 @@ class MainViewController: UIViewController {
         overlayView.stopAnimation()
         overlayView.isHidden = true
         scanInfoContainer.isHidden = true
-        meshGrid3DView.isHidden = true
-        toggle3DButton.isHidden = true
         saveMapButton.isHidden = true
-        is3DViewVisible = false
         scanProgressBar.setProgress(0, animated: false)
         scanProgressLabel.text = "데이터 수집: 0%"
         scanProgress = 0

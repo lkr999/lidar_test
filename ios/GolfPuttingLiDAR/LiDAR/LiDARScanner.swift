@@ -28,20 +28,22 @@ class LiDARScanner: NSObject, ARSessionDelegate {
     private let processingQueue = DispatchQueue(label: "lidar.processing.queue", qos: .userInitiated)
     private var isScanning = false
 
-    // 높이 맵 그리드 설정 + 누적 버퍼 (8m×8m, 5cm 해상도)
+    // 높이 맵 그리드 설정 + 누적 버퍼 (폭 3m × 깊이 10m, 5cm 해상도)
+    // 그리드는 스캔 시작 시 카메라가 바라보는 방향(yaw)에 정렬된다:
+    // 로컬 X = 폭(3m), 로컬 Z = 깊이(카메라 전방 10m)
     // 누적/평균화 순수 로직은 TerrainGridAccumulator로 분리 (단위 테스트 가능)
     private var grid = TerrainGridAccumulator(
-        gridWidth: 160, gridHeight: 160, cellSize: 0.05,
+        gridWidth: 60, gridHeight: 200, cellSize: 0.05,
         targetSamplesPerCell: 2
     )
     private var targetGridWidth:  Int    { grid.gridWidth }
     private var targetGridHeight: Int    { grid.gridHeight }
     private var targetCellSize:   Double { grid.cellSize }
-    // 스캔 ROI: 오버레이 가이드와 동일한 중앙 직사각형 비율 (ScanOverlayView.draw 참조)
-    private let scanRectWidthRatio: Double = 0.82
-    private let scanRectHeightRatio: Double = 0.56
+    // 스캔 ROI: 오버레이 가이드와 동일 — 화면 전체 (ScanOverlayView.draw 참조)
+    private let scanRectWidthRatio: Double = 1.0
+    private let scanRectHeightRatio: Double = 1.0
     /// 가이드 사각형의 화면 세로 중심 오프셋 (pt, ScanOverlayView와 동일)
-    private let scanRectCenterYOffset: Double = -18.0
+    private let scanRectCenterYOffset: Double = 0.0
 
     // ── ROI 매핑용 뷰포트 정보 (메인 뷰에서 설정) ─────────────────────────
     /// AR 화면 뷰포트 크기. 화면 가이드 사각형을 깊이 맵 좌표로 역변환할 때 사용.
@@ -95,6 +97,10 @@ class LiDARScanner: NSObject, ARSessionDelegate {
     private var gridOriginX: Double = 0
     private var gridOriginZ: Double = 0
     private var gridOriginSet = false
+    /// 그리드 yaw — 스캔 시작 시 카메라 방향. 월드↔그리드 로컬 변환에 사용
+    private var gridYaw: Double = 0
+    private var gridYawCos: Double = 1
+    private var gridYawSin: Double = 0
     /// 마지막 패닝 체크 시 카메라 위치
     private var lastPanCameraX: Double = 0
     private var lastPanCameraZ: Double = 0
@@ -299,6 +305,9 @@ class LiDARScanner: NSObject, ARSessionDelegate {
         gridOriginX            = 0
         gridOriginZ            = 0
         gridOriginSet          = false
+        gridYaw                = 0
+        gridYawCos             = 1
+        gridYawSin             = 0
         lastPanCameraX         = 0
         lastPanCameraZ         = 0
         groundDetected         = false
@@ -371,19 +380,26 @@ class LiDARScanner: NSObject, ARSessionDelegate {
         let camPosZ = Double(frame.camera.transform.columns.3.z)
 
         if !gridOriginSet {
-            // 첫 유효 프레임: 카메라 전방 4m(그리드 반경) 지점을 그리드 중심으로 설정
+            // 첫 유효 프레임: 카메라가 바라보는 방향에 그리드를 정렬하고,
+            // 전방 5m(깊이 10m의 절반) 지점을 그리드 중심으로 설정
             let camFwd = frame.camera.transform.columns.2
             let fwdX = -Double(camFwd.x)
             let fwdZ = -Double(camFwd.z)
             let fwdLen = sqrt(fwdX * fwdX + fwdZ * fwdZ)
-            let halfRange = Double(targetGridWidth) * targetCellSize / 2.0
+            let halfDepth = Double(targetGridHeight) * targetCellSize / 2.0
             if fwdLen > 0.01 {
-                gridOriginX = camPosX + fwdX / fwdLen * halfRange
-                gridOriginZ = camPosZ + fwdZ / fwdLen * halfRange
+                let fx = fwdX / fwdLen, fz = fwdZ / fwdLen
+                gridOriginX = camPosX + fx * halfDepth
+                gridOriginZ = camPosZ + fz * halfDepth
+                // 그리드 로컬 +Z(깊이) 축이 카메라 전방을 향하도록 yaw 설정
+                gridYaw = atan2(-fx, fz)
             } else {
                 gridOriginX = camPosX
                 gridOriginZ = camPosZ
+                gridYaw = 0
             }
+            gridYawCos = cos(gridYaw)
+            gridYawSin = sin(gridYaw)
             gridOriginSet = true
             lastPanCameraX = camPosX
             lastPanCameraZ = camPosZ
@@ -455,22 +471,30 @@ class LiDARScanner: NSObject, ARSessionDelegate {
         let dx = cameraX - lastPanCameraX
         let dz = cameraZ - lastPanCameraZ
 
-        guard abs(dx) > gridPanThreshold || abs(dz) > gridPanThreshold else { return }
+        // 이동량을 그리드 로컬 축(yaw 역회전)으로 변환해 판단·시프트
+        let localDX =  dx * gridYawCos + dz * gridYawSin
+        let localDZ = -dx * gridYawSin + dz * gridYawCos
+
+        guard abs(localDX) > gridPanThreshold || abs(localDZ) > gridPanThreshold else { return }
 
         // 시프트할 셀 수 계산
-        let shiftCellsX = Int((dx / targetCellSize).rounded())
-        let shiftCellsZ = Int((dz / targetCellSize).rounded())
+        let shiftCellsX = Int((localDX / targetCellSize).rounded())
+        let shiftCellsZ = Int((localDZ / targetCellSize).rounded())
 
         guard shiftCellsX != 0 || shiftCellsZ != 0 else { return }
 
         // 그리드 데이터 시프트
         grid.shift(dxCells: shiftCellsX, dzCells: shiftCellsZ)
 
-        // 원점·기준 카메라 위치 업데이트 (셀 단위로 양자화된 이동량만 반영)
-        gridOriginX += Double(shiftCellsX) * targetCellSize
-        gridOriginZ += Double(shiftCellsZ) * targetCellSize
-        lastPanCameraX += Double(shiftCellsX) * targetCellSize
-        lastPanCameraZ += Double(shiftCellsZ) * targetCellSize
+        // 셀 단위로 양자화된 로컬 이동량을 월드 좌표로 환산해 원점·기준 갱신
+        let movedLX = Double(shiftCellsX) * targetCellSize
+        let movedLZ = Double(shiftCellsZ) * targetCellSize
+        let movedWX = movedLX * gridYawCos - movedLZ * gridYawSin
+        let movedWZ = movedLX * gridYawSin + movedLZ * gridYawCos
+        gridOriginX += movedWX
+        gridOriginZ += movedWZ
+        lastPanCameraX += movedWX
+        lastPanCameraZ += movedWZ
     }
 
     // MARK: - Depth Processing
@@ -696,9 +720,14 @@ class LiDARScanner: NSObject, ARSessionDelegate {
     @discardableResult
     private func mapToGrid(worldX: Double, worldY: Double, worldZ: Double,
                            confidence: Double, isHighConfidence: Bool = false) -> Bool {
-        grid.accumulate(
-            relX: worldX - gridOriginX,
-            relZ: worldZ - gridOriginZ,
+        // 월드 → 그리드 로컬 (yaw 역회전): 그리드는 스캔 시작 카메라 방향에 정렬됨
+        let dx = worldX - gridOriginX
+        let dz = worldZ - gridOriginZ
+        let relX =  dx * gridYawCos + dz * gridYawSin
+        let relZ = -dx * gridYawSin + dz * gridYawCos
+        return grid.accumulate(
+            relX: relX,
+            relZ: relZ,
             height: worldY,
             confidence: confidence,
             isHighConfidence: isHighConfidence
@@ -738,6 +767,7 @@ class LiDARScanner: NSObject, ARSessionDelegate {
             originX: gridOriginX,
             originZ: gridOriginZ,
             groundY: baseline,
+            gridYaw: gridYaw,
             cameraHeight: Double(fusedCameraHeight)
         )
     }
@@ -932,7 +962,8 @@ class LiDARScanner: NSObject, ARSessionDelegate {
     }
 
     private func targetCoverageCellCount() -> Int {
-        let cells = Double(targetGridWidth * targetGridHeight) * scanRectWidthRatio * scanRectHeightRatio
+        // 3m×10m 그리드는 한 위치에서 전부 보이지 않으므로 60%를 목표 커버리지로 본다
+        let cells = Double(targetGridWidth * targetGridHeight) * 0.6
         return max(1, Int(cells.rounded()))
     }
 
@@ -1001,6 +1032,7 @@ class LiDARScanner: NSObject, ARSessionDelegate {
             originX: gridOriginX,
             originZ: gridOriginZ,
             groundY: baseline,
+            gridYaw: gridYaw,
             cameraHeight: Double(fusedCameraHeight)
         )
 

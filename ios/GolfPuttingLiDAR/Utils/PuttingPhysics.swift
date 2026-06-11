@@ -157,6 +157,21 @@ class PuttingPhysics {
         ))
     }
 
+    // MARK: - Relative Power (평지 기준 상대 세기)
+
+    /// 평지(높이차 0)·중간 저항(50%)에서 같은 거리를 보내는 데 필요한
+    /// 운동에너지를 100으로 두고, 실제 추천 속도의 운동에너지를 비례 수치로 환산.
+    /// 오르막·고저항이면 100보다 커지고, 내리막·저저항이면 작아진다.
+    func relativePowerPercent(speed: Double, ballPos: Vector2, holePos: Vector2) -> Double {
+        let distance = max(0.01, (holePos - ballPos).length)
+        // 기준: 평지 + 저항 50% (중립 그린)에서의 필요 속도² = 2·μ기준·g·d
+        let referenceFriction = PuttingPhysics.baseFriction * 1.5
+        let flatSpeedSquared = 2.0 * referenceFriction * PuttingPhysics.gravity * distance
+        guard flatSpeedSquared > 1e-9 else { return 100 }
+        let power = 100.0 * (speed * speed) / flatSpeedSquared
+        return max(1, min(999, power))
+    }
+
     private func estimateLaunchSpeed(from ball: Vector2, to hole: Vector2) -> Double {
         let distance = max(0.01, (hole - ball).length)
         let ballH = terrainHeight(at: ball)

@@ -26,6 +26,8 @@ class TrajectoryOverlayView: UIView {
     private var breakAmount: Double = 0       // meters
     private var puttSpeed: Double = 0         // m/s
     private var resistancePercent: Double = 50 // 0~100
+    /// 평지(높이차 0)=100 기준 상대 퍼팅 세기 (중력·표면 저항 반영)
+    private var powerPercent: Double = 100
 
     // 실시간 스트리밍 모드 (스캔 중 메쉬 미리보기)
     private var isStreamingMode = false
@@ -36,6 +38,9 @@ class TrajectoryOverlayView: UIView {
 
     private var displayLink: CADisplayLink?
     private var animProgress: Double = 0
+    /// 물결 흐름 애니메이션 시간 (초). 경사 화살표가 내리막으로 흐르는 위상에 사용
+    private var flowPhase: Double = 0
+    private var lastTickTime: CFTimeInterval = 0
 
     // MARK: - Init
 
@@ -70,7 +75,8 @@ class TrajectoryOverlayView: UIView {
                    ballPos: Vector2, holePos: Vector2, aimDirection: Vector2,
                    camera: ARCamera? = nil, viewportSize: CGSize = .zero,
                    puttDistance: Double = 0, breakAmount: Double = 0,
-                   puttSpeed: Double = 0, resistancePercent: Double = 50) {
+                   puttSpeed: Double = 0, resistancePercent: Double = 50,
+                   powerPercent: Double = 100) {
         self.terrain      = terrain
         self.trajectory   = trajectory
         self.ballPos      = ballPos
@@ -82,19 +88,36 @@ class TrajectoryOverlayView: UIView {
         self.breakAmount  = breakAmount
         self.puttSpeed    = puttSpeed
         self.resistancePercent = resistancePercent
+        self.powerPercent = powerPercent
         self.isStreamingMode = false
         invalidateTerrainCache()
 
         animProgress = 0
+        lastTickTime = 0
         displayLink?.invalidate()
         displayLink = CADisplayLink(target: self, selector: #selector(tick))
+        // 물결 흐름은 상시 애니메이션이므로 20fps로 제한해 CPU 부담을 줄인다
+        displayLink?.preferredFramesPerSecond = 20
         displayLink?.add(to: .main, forMode: .common)
     }
 
+    /// 숨겨지면 흐름 애니메이션 중단 (불필요한 리드로 방지)
+    override var isHidden: Bool {
+        didSet {
+            if isHidden {
+                displayLink?.invalidate()
+                displayLink = nil
+            }
+        }
+    }
+
     @objc private func tick() {
-        animProgress = min(animProgress + 0.018, 1.0)
+        let now = CACurrentMediaTime()
+        let dt = lastTickTime > 0 ? min(now - lastTickTime, 0.1) : 1.0 / 20.0
+        lastTickTime = now
+        animProgress = min(animProgress + 0.05, 1.0)
+        flowPhase += dt
         setNeedsDisplay()
-        if animProgress >= 1.0 { displayLink?.invalidate(); displayLink = nil }
     }
 
     // MARK: - Display Trajectory (ball → ... → hole)
@@ -169,9 +192,10 @@ class TrajectoryOverlayView: UIView {
 
     private func drawProjected(ctx: CGContext, rect: CGRect,
                                 terrain: HeightMapData, disp: [Vector2]) {
-        // ① 높이 히트맵 + 30cm 격자 + 물 흐름 화살표 (투영)
+        // ① 높이 히트맵 + 30cm 격자 + 등고선 + 물 흐름 화살표 (투영)
         drawProjectedHeightMap(ctx: ctx, terrain: terrain)
         drawProjectedGrid(ctx: ctx, terrain: terrain)
+        drawProjectedContours(ctx: ctx, terrain: terrain)
         drawProjectedWaterArrows(ctx: ctx, terrain: terrain)
 
         let endIdx = max(2, Int(Double(disp.count) * animProgress))
@@ -471,19 +495,26 @@ class TrajectoryOverlayView: UIView {
                 let point = Vector2(x: gx, y: gy)
                 let slope = slopeAt(point, terrain: terrain)
                 let mag = slope.length
-                if mag > 0.003 {
+                if mag > 0.0015 {
+                    // 물결 흐름: 내리막 방향으로 이동하며 깜빡이는 화살표 (속도 ∝ 경사)
+                    let flow = flowCycle(mag: mag)
                     let arrowColor = slopeGradientColor(ratio: min(mag / maxSlope, 1.0))
+                        .withAlphaComponent(CGFloat(flow.alpha))
                     ctx.setFillColor(arrowColor.cgColor)
                     ctx.setStrokeColor(arrowColor.cgColor)
 
                     let norm = slope.normalized()
                     let arrowLen = min(CGFloat(mag) * 450.0, maxLen)
-                    let from = CGPoint(x: CGFloat(gx) * sx + ox, y: CGFloat(gy) * sx + oy)
+                    let travel = CGFloat(flow.offset) * maxLen * 0.9
+                    let from = CGPoint(
+                        x: CGFloat(gx) * sx + ox + CGFloat(norm.x) * travel,
+                        y: CGFloat(gy) * sx + oy + CGFloat(norm.y) * travel
+                    )
                     let to = CGPoint(
                         x: from.x + CGFloat(norm.x) * arrowLen,
                         y: from.y + CGFloat(norm.y) * arrowLen
                     )
-                    drawArrow(ctx: ctx, from: from, to: to, headFraction: 0.38)
+                    drawArrow(ctx: ctx, from: from, to: to, headFraction: 0.38, lineWidth: 2.2)
                 }
                 gx += spacing
             }
@@ -511,15 +542,20 @@ class TrajectoryOverlayView: UIView {
                     let slope = slopeAt(point, terrain: terrain)
                     let mag = slope.length
                     if mag > 0.0015 {
-                        let alpha = 0.30 + 0.62 * focus
+                        let flow = flowCycle(mag: mag)
+                        let alpha = (0.30 + 0.62 * focus) * flow.alpha
                         let arrowColor = slopeGradientColor(ratio: min(mag / maxSlope, 1.0))
-                            .withAlphaComponent(alpha)
+                            .withAlphaComponent(CGFloat(alpha))
                         ctx.setFillColor(arrowColor.cgColor)
                         ctx.setStrokeColor(arrowColor.cgColor)
 
                         let norm = slope.normalized()
                         let arrowLen = min(CGFloat(mag) * 360.0, maxLen) * CGFloat(0.72 + 0.30 * focus)
-                        let from = CGPoint(x: CGFloat(gx) * sx + ox, y: CGFloat(gy) * sx + oy)
+                        let travel = CGFloat(flow.offset) * maxLen * 0.9
+                        let from = CGPoint(
+                            x: CGFloat(gx) * sx + ox + CGFloat(norm.x) * travel,
+                            y: CGFloat(gy) * sx + oy + CGFloat(norm.y) * travel
+                        )
                         let to = CGPoint(
                             x: from.x + CGFloat(norm.x) * arrowLen,
                             y: from.y + CGFloat(norm.y) * arrowLen
@@ -529,7 +565,7 @@ class TrajectoryOverlayView: UIView {
                             from: from,
                             to: to,
                             headFraction: 0.32,
-                            lineWidth: CGFloat(0.75 + 0.75 * focus)
+                            lineWidth: CGFloat(1.0 + 0.9 * focus)
                         )
                     }
                 }
@@ -552,16 +588,22 @@ class TrajectoryOverlayView: UIView {
                 let point = Vector2(x: gx, y: gy)
                 let slope = slopeAt(point, terrain: terrain)
                 let mag = slope.length
-                if mag > 0.003, let center = gridPosToScreen(point) {
+                if mag > 0.0015 {
+                    // 물결 흐름: 내리막 방향으로 이동하며 깜빡이는 화살표 (속도 ∝ 경사)
+                    let flow = flowCycle(mag: mag)
                     let arrowColor = slopeGradientColor(ratio: min(mag / maxSlope, 1.0))
+                        .withAlphaComponent(CGFloat(flow.alpha))
                     ctx.setFillColor(arrowColor.cgColor)
                     ctx.setStrokeColor(arrowColor.cgColor)
 
                     let arrowM = min(mag * 5, 0.12)
                     let norm = slope.normalized()
-                    let tipGrid = Vector2(x: gx + norm.x * arrowM, y: gy + norm.y * arrowM)
-                    if let tip = gridPosToScreen(tipGrid) {
-                        drawArrow(ctx: ctx, from: center, to: tip, headFraction: 0.38)
+                    let off = flow.offset * spacing * 0.45
+                    let baseGrid = Vector2(x: gx + norm.x * off, y: gy + norm.y * off)
+                    let tipGrid = baseGrid + norm * arrowM
+                    if let center = gridPosToScreen(baseGrid),
+                       let tip = gridPosToScreen(tipGrid) {
+                        drawArrow(ctx: ctx, from: center, to: tip, headFraction: 0.38, lineWidth: 2.2)
                     }
                 }
                 gx += spacing
@@ -587,23 +629,27 @@ class TrajectoryOverlayView: UIView {
                 if focus > 0 {
                     let slope = slopeAt(point, terrain: terrain)
                     let mag = slope.length
-                    if mag > 0.0015, let center = gridPosToScreen(point) {
-                        let alpha = 0.30 + 0.62 * focus
+                    if mag > 0.0015 {
+                        let flow = flowCycle(mag: mag)
+                        let alpha = (0.30 + 0.62 * focus) * flow.alpha
                         let arrowColor = slopeGradientColor(ratio: min(mag / maxSlope, 1.0))
-                            .withAlphaComponent(alpha)
+                            .withAlphaComponent(CGFloat(alpha))
                         ctx.setFillColor(arrowColor.cgColor)
                         ctx.setStrokeColor(arrowColor.cgColor)
 
                         let arrowM = min(mag * 4.2, spacing * 0.42) * (0.72 + 0.30 * focus)
                         let norm = slope.normalized()
-                        let tipGrid = Vector2(x: gx + norm.x * arrowM, y: gy + norm.y * arrowM)
-                        if let tip = gridPosToScreen(tipGrid) {
+                        let off = flow.offset * spacing * 0.45
+                        let baseGrid = Vector2(x: gx + norm.x * off, y: gy + norm.y * off)
+                        let tipGrid = baseGrid + norm * arrowM
+                        if let center = gridPosToScreen(baseGrid),
+                           let tip = gridPosToScreen(tipGrid) {
                             drawArrow(
                                 ctx: ctx,
                                 from: center,
                                 to: tip,
                                 headFraction: 0.32,
-                                lineWidth: CGFloat(0.75 + 0.75 * focus)
+                                lineWidth: CGFloat(1.0 + 0.9 * focus)
                             )
                         }
                     }
@@ -612,6 +658,15 @@ class TrajectoryOverlayView: UIView {
             }
             gy += spacing
         }
+    }
+
+    /// 물결 흐름 사이클 — 경사가 급할수록 빨리 흐른다 (속도 ∝ 경사 크기)
+    /// - Returns: offset 0..1 (내리막 방향 이동 위상), alpha (페이드 인/아웃)
+    private func flowCycle(mag: Double) -> (offset: Double, alpha: Double) {
+        let speed = 0.25 + min(mag / 0.10, 1.0) * 1.5   // 완경사 0.25 ~ 급경사 1.75 cycles/sec
+        let t = (flowPhase * speed).truncatingRemainder(dividingBy: 1.0)
+        let alpha = 0.30 + 0.70 * sin(.pi * t)
+        return (t, alpha)
     }
 
     private func slopeAt(_ point: Vector2, terrain: HeightMapData) -> Vector2 {
@@ -679,6 +734,68 @@ class TrajectoryOverlayView: UIView {
             total += (path[idx] - path[idx - 1]).length
         }
         return total
+    }
+
+    // MARK: - 등고선 투영 (카메라 모드) — 1cm 간격, 5cm 주요선 강조
+
+    /// 마칭 스퀘어 교차점을 카메라에 투영해 실제 스캔 이미지 위에 등고선을 그린다
+    private func drawProjectedContours(ctx: CGContext, terrain: HeightMapData) {
+        let minH = terrain.minHeight, maxH = terrain.maxHeight
+        // 높이 변화가 4mm 미만이면 등고선 생략 (사실상 평지)
+        guard maxH - minH > 0.004 else { return }
+
+        let contourInterval = 0.01  // 1cm
+        let step = 2
+        let cell = terrain.cellSize
+
+        var level = (minH / contourInterval).rounded(.down) * contourInterval
+        while level <= maxH {
+            let isMajor = abs(level.remainder(dividingBy: 0.05)) < 0.001
+            ctx.setLineWidth(isMajor ? 2.8 : 1.3)
+            ctx.setStrokeColor(isMajor
+                ? UIColor(red: 0.45, green: 0.95, blue: 1.0, alpha: 0.95).cgColor
+                : UIColor.white.withAlphaComponent(0.50).cgColor)
+
+            for y in stride(from: 0, to: terrain.gridHeight - step, by: step) {
+                for x in stride(from: 0, to: terrain.gridWidth - step, by: step) {
+                    let h00 = terrain.getHeight(x: x, y: y)
+                    let h10 = terrain.getHeight(x: x + step, y: y)
+                    let h01 = terrain.getHeight(x: x, y: y + step)
+                    let h11 = terrain.getHeight(x: x + step, y: y + step)
+
+                    var pts: [Vector2] = []
+                    if (h00 - level) * (h10 - level) < 0 {
+                        let t = (level - h00) / (h10 - h00)
+                        pts.append(Vector2(x: (Double(x) + t * Double(step)) * cell,
+                                           y: Double(y) * cell))
+                    }
+                    if (h10 - level) * (h11 - level) < 0 {
+                        let t = (level - h10) / (h11 - h10)
+                        pts.append(Vector2(x: Double(x + step) * cell,
+                                           y: (Double(y) + t * Double(step)) * cell))
+                    }
+                    if (h01 - level) * (h11 - level) < 0 {
+                        let t = (level - h01) / (h11 - h01)
+                        pts.append(Vector2(x: (Double(x) + t * Double(step)) * cell,
+                                           y: Double(y + step) * cell))
+                    }
+                    if (h00 - level) * (h01 - level) < 0 {
+                        let t = (level - h00) / (h01 - h00)
+                        pts.append(Vector2(x: Double(x) * cell,
+                                           y: (Double(y) + t * Double(step)) * cell))
+                    }
+
+                    if pts.count >= 2,
+                       let p0 = gridPosToScreen(pts[0]),
+                       let p1 = gridPosToScreen(pts[1]) {
+                        ctx.move(to: p0)
+                        ctx.addLine(to: p1)
+                        ctx.strokePath()
+                    }
+                }
+            }
+            level += contourInterval
+        }
     }
 
     // MARK: - 등고선 (탑뷰) — 절대 높이 기준 1cm 간격 + 레이블
@@ -794,11 +911,12 @@ class TrajectoryOverlayView: UIView {
         ctx.restoreGState()
     }
 
-    /// 에임 방향 종점 계산: 공이 처음 출발해야 하는 방향만 짧게 표시
+    /// 에임 방향 종점 계산: 볼-홀 거리 이상으로 길게 표시해
+    /// 조준선이 홀 너머까지 이어지도록 한다
     private func aimEndPoint() -> Vector2 {
         let dir = launchDirection()
         let distance = max(puttDistance, (holePos - ballPos).length)
-        let guideLength = min(1.2, max(0.45, distance * 0.35))
+        let guideLength = max(distance * 1.15, distance + 0.3)
         return ballPos + dir * guideLength
     }
 
@@ -884,7 +1002,7 @@ class TrajectoryOverlayView: UIView {
         let heightDiffM = terrain.getHeight(x: holeGX, y: holeGY)
                         - terrain.getHeight(x: ballGX, y: ballGY)
 
-        let boxW: CGFloat = 195, boxH: CGFloat = 118
+        let boxW: CGFloat = 195, boxH: CGFloat = 136
         // 상단 상태바(~70pt) 아래에 배치
         let safeTop = self.safeAreaInsets.top
         let box = CGRect(x: rect.width - boxW - 12, y: safeTop + 68, width: boxW, height: boxH)
@@ -923,9 +1041,21 @@ class TrajectoryOverlayView: UIView {
             .draw(at: CGPoint(x: tx, y: ty), withAttributes: attrs)
         ty += 18
 
+        // 높이차: 홀이 볼보다 높으면 흰 배경에 진한 검정, 낮으면 붉은색
         let diffSymbol = heightDiffM >= 0 ? "↑" : "↓"
+        let heightAttrs: [NSAttributedString.Key: Any] = heightDiffM >= 0
+            ? [.font: UIFont.systemFont(ofSize: 12, weight: .heavy),
+               .foregroundColor: UIColor.black,
+               .backgroundColor: UIColor.white.withAlphaComponent(0.92)]
+            : [.font: UIFont.systemFont(ofSize: 12, weight: .heavy),
+               .foregroundColor: UIColor(red: 1.0, green: 0.23, blue: 0.19, alpha: 1)]
         (String(format: "높이차: %@%.2fm", diffSymbol, abs(heightDiffM)) as NSString)
-            .draw(at: CGPoint(x: tx, y: ty), withAttributes: attrs)
+            .draw(at: CGPoint(x: tx, y: ty), withAttributes: heightAttrs)
+        ty += 18
+
+        // 퍼팅 세기: 평지(높이차 0)=100 기준, 중력·표면 저항 반영 비례 수치
+        (String(format: "세기: %.0f (평지=100)", powerPercent) as NSString)
+            .draw(at: CGPoint(x: tx, y: ty), withAttributes: valAttrs)
         ty += 18
 
         (String(format: "저항: %.0f%%", resistancePercent) as NSString)
@@ -936,14 +1066,14 @@ class TrajectoryOverlayView: UIView {
 
     private func gridToWorld3D(_ pos: Vector2) -> SIMD3<Float>? {
         guard let t = terrain else { return nil }
-        let rx = Double(t.gridWidth)  * t.cellSize / 2.0
-        let rz = Double(t.gridHeight) * t.cellSize / 2.0
         let gx = min(t.gridWidth  - 1, max(0, Int(pos.x / t.cellSize)))
         let gy = min(t.gridHeight - 1, max(0, Int(pos.y / t.cellSize)))
-        // 그리드 원점(originX/Z) 기반 월드 좌표 변환
-        return SIMD3<Float>(Float(pos.x - rx + t.originX),
+        // 그리드 로컬 → 월드 변환 — 그리드 yaw(카메라 방향 정렬)를 반영하는
+        // HeightMapData 공용 헬퍼를 사용해야 역투영(위치 선택)과 정확히 일치한다
+        let world = t.gridLocalToWorldXZ(pos)
+        return SIMD3<Float>(Float(world.x),
                             Float(t.getHeight(x: gx, y: gy) + t.groundY),
-                            Float(pos.y - rz + t.originZ))
+                            Float(world.z))
     }
 
     private func projectToScreen(_ world: SIMD3<Float>) -> CGPoint? {

@@ -64,12 +64,8 @@ class ScanOverlayView: UIView {
         ctx.setFillColor(UIColor.black.withAlphaComponent(0.26).cgColor)
         ctx.fill(rect)
 
-        // 스캔 가이드 직사각형 (화면 중앙 약간 위)
-        let gw = rect.width  * 0.82
-        let gh = rect.height * 0.56
-        let gx = (rect.width  - gw) / 2
-        let gy = (rect.height - gh) / 2 - 18
-        let guideRect = CGRect(x: gx, y: gy, width: gw, height: gh)
+        // 스캔 가이드 직사각형 — 화면 전체 (스캔 ROI와 동일, LiDARScanner의 scanRect 비율 1.0)
+        let guideRect = rect.insetBy(dx: 3, dy: 3)
 
         // 맥동 글로우
         let pulse = CGFloat(0.10 + 0.08 * abs(sin(animPhase)))

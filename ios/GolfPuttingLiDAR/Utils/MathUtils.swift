@@ -66,6 +66,9 @@ struct HeightMapData {
     var originZ: Double = 0
     /// 감지된 지면 Y 좌표
     var groundY: Double = 0
+    /// 그리드 로컬 축의 월드 기준 회전각 (rad).
+    /// 스캔 시작 시 카메라가 바라보는 방향이 그리드 깊이(+Y/로컬Z) 축이 되도록 설정된다.
+    var gridYaw: Double = 0
     /// 추정 카메라 높이 (지면 대비, 미터)
     var cameraHeight: Double = 1.6
     /// 이 HeightMap이 상위 그리드에서 시작하는 X 좌표(m). 원본 그리드는 0.
@@ -143,6 +146,32 @@ struct HeightMapData {
 
     func localToParent(_ point: Vector2) -> Vector2 {
         Vector2(x: point.x + localOriginX, y: point.y + localOriginY)
+    }
+
+    // MARK: - 그리드 ↔ 월드 좌표 변환 (yaw 회전 반영)
+
+    /// 그리드 로컬 좌표(meters, 0..widthMeters/0..heightMeters) → 월드 XZ.
+    /// 투영(TrajectoryOverlayView)과 역투영(위치 선택)이 반드시 이 변환을 공유해야
+    /// 화면-그리드 위치가 일치한다.
+    func gridLocalToWorldXZ(_ point: Vector2) -> (x: Double, z: Double) {
+        let lx = point.x - widthMeters / 2.0
+        let lz = point.y - heightMeters / 2.0
+        let c = cos(gridYaw), s = sin(gridYaw)
+        return (
+            x: originX + lx * c - lz * s,
+            z: originZ + lx * s + lz * c
+        )
+    }
+
+    /// 월드 XZ → 그리드 로컬 좌표 (gridLocalToWorldXZ의 역변환)
+    func worldXZToGridLocal(x: Double, z: Double) -> Vector2 {
+        let dx = x - originX
+        let dz = z - originZ
+        let c = cos(gridYaw), s = sin(gridYaw)
+        return Vector2(
+            x: dx * c + dz * s + widthMeters / 2.0,
+            y: -dx * s + dz * c + heightMeters / 2.0
+        )
     }
 
     /// 가우시안 스무딩 적용 (Accelerate vDSP 가속)
@@ -290,6 +319,7 @@ struct HeightMapData {
             originX: originX + startX - originalHalfW + subWidth / 2.0,
             originZ: originZ + startY - originalHalfH + subHeightMeters / 2.0,
             groundY: groundY,
+            gridYaw: gridYaw,
             cameraHeight: cameraHeight,
             localOriginX: startX,
             localOriginY: startY
